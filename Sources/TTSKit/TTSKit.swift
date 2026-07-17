@@ -48,6 +48,11 @@ open class TTSKit: @unchecked Sendable {
     /// Tokenizer. `nil` before the first `loadModels()` call or after `unloadModels()`.
     public var tokenizer: (any TTSTokenizer)?
 
+    /// Reference-clip encoder for voice cloning. `nil` until
+    /// `loadVoiceCloneModels()` runs - the encoder assets are loaded lazily so
+    /// plain custom-voice usage never touches them.
+    public private(set) var voiceCloneEncoder: VoiceCloneEncoder?
+
     // MARK: - Model state
 
     /// Current lifecycle state of the loaded models.
@@ -554,6 +559,118 @@ open class TTSKit: @unchecked Sendable {
         return TTSTokenizerWrapper(wrapper)
     }
 
+    /// Load the voice-clone encoder models (SpeakerEncoder, SpeechEncoder,
+    /// SpeechEncoderRVQ) from the configured model folder.
+    ///
+    /// Separate from `loadModels()` on purpose: the encoder assets are only
+    /// needed when cloning a voice, and they only exist for the base-family
+    /// model variants (`TTSModelVariant.qwen3TTS_0_6b_base`). No-op if the
+    /// encoders are already loaded.
+    ///
+    /// - Throws: `TTSError.invalidConfiguration` if any encoder bundle is
+    ///   missing from disk, naming the component path that failed to resolve.
+    open func loadVoiceCloneModels() async throws {
+        guard voiceCloneEncoder == nil else {
+            Logging.debug("Voice-clone models already loaded, skipping")
+            return
+        }
+        guard let modelFolder = config.modelFolder,
+            FileManager.default.fileExists(atPath: modelFolder.path)
+        else {
+            throw TTSError.modelNotFound(config.modelFolder?.path ?? "<nil>")
+        }
+
+        // Resolve the three encoder URLs up front so a missing asset fails with
+        // a clear message instead of crashing mid-clone.
+        func requireURL(_ component: String, _ variant: String) throws -> URL {
+            guard let url = config.modelURL(component: component, variant: variant) else {
+                throw TTSError.invalidConfiguration(
+                    "No .mlmodelc found at \(component)/\(config.versionDir)/\(variant) inside \(modelFolder.path). "
+                        + "Voice-clone encoder assets are only published for the base model variants "
+                        + "(e.g. --model \(TTSModelVariant.qwen3TTS_0_6b_base.rawValue))."
+                )
+            }
+            return url
+        }
+        let seURL = try requireURL("speaker_encoder", config.speakerEncoderVariant)
+        let spURL = try requireURL("speech_encoder", config.speechEncoderVariant)
+        let rvqURL = try requireURL("speech_encoder_rvq", config.speechEncoderRVQVariant)
+
+        let speakerEncoder = Qwen3SpeakerEncoder()
+        let speechEncoder = Qwen3SpeechEncoder()
+        let rvqEncoder = Qwen3SpeechEncoderRVQ()
+
+        // The encoders run once per reference clip; CPU + ANE like the other
+        // convolutional components (they are not embedding-table lookups).
+        let units: MLComputeUnits = .cpuAndNeuralEngine
+
+        let loadStart = CFAbsoluteTimeGetCurrent()
+        Logging.info("Loading 3 voice-clone CoreML models concurrently...")
+        Logging.debug("  SpeakerEncoder:    \(seURL.lastPathComponent)  (\(config.speakerEncoderVariant))")
+        Logging.debug("  SpeechEncoder:     \(spURL.lastPathComponent)  (\(config.speechEncoderVariant))")
+        Logging.debug("  SpeechEncoderRVQ:  \(rvqURL.lastPathComponent) (\(config.speechEncoderRVQVariant))")
+
+        async let loadSE: Void = speakerEncoder.loadModel(at: seURL, computeUnits: units)
+        async let loadSP: Void = speechEncoder.loadModel(at: spURL, computeUnits: units)
+        async let loadRVQ: Void = rvqEncoder.loadModel(at: rvqURL, computeUnits: units)
+        _ = try await (loadSE, loadSP, loadRVQ)
+
+        voiceCloneEncoder = VoiceCloneEncoder(
+            speakerEncoder: speakerEncoder,
+            speechEncoder: speechEncoder,
+            rvqEncoder: rvqEncoder
+        )
+        Logging.info(String(format: "Voice-clone model load: %.2fs", CFAbsoluteTimeGetCurrent() - loadStart))
+    }
+
+    /// Encode a reference clip into a reusable ``VoiceClonePrompt``.
+    ///
+    /// Loads the voice-clone encoders on first use, decodes `referenceAudio` to
+    /// 24 kHz mono, and runs the SpeakerEncoder (plus the SpeechEncoder + RVQ
+    /// stack for ICL mode). Pass the returned prompt to `generate` via
+    /// `GenerationOptions.voiceClone`; it can be reused across any number of
+    /// generate calls for the same voice.
+    ///
+    /// - Parameters:
+    ///   - referenceAudio: Reference clip of the target speaker (any
+    ///     `AVAudioFile`-readable format; conventionally 3-15 s).
+    ///   - referenceText: Transcript of the reference clip. Required for ICL
+    ///     cloning - the transcript is baked into the generation prefix.
+    ///   - xVectorOnly: `true` skips the reference RVQ codes and clones with
+    ///     the x-vector alone (lower fidelity; no transcript needed).
+    /// - Returns: The encoded ``VoiceClonePrompt`` including `referenceText`.
+    /// - Throws: `TTSError.invalidConfiguration` if `referenceText` is missing
+    ///   in ICL mode or the encoder assets are unavailable.
+    public func cloneVoice(
+        referenceAudio: URL,
+        referenceText: String? = nil,
+        xVectorOnly: Bool = false
+    ) async throws -> VoiceClonePrompt {
+        guard xVectorOnly || referenceText != nil else {
+            throw TTSError.invalidConfiguration(
+                "ICL voice cloning requires the reference clip's transcript. "
+                    + "Pass referenceText, or set xVectorOnly to true for x-vector-only cloning."
+            )
+        }
+        try await loadVoiceCloneModels()
+        guard let voiceCloneEncoder else {
+            throw TTSError.invalidConfiguration("Voice-clone encoder failed to initialize")
+        }
+
+        let waveform = try AudioInput.loadMono(
+            url: referenceAudio, sampleRate: Double(VoiceCloneEncoder.sampleRate)
+        )
+        let encoded = try await voiceCloneEncoder.encode(waveform, includeReferenceCodes: !xVectorOnly)
+
+        // Re-wrap to attach the transcript: ICL prefix assembly needs it.
+        return VoiceClonePrompt(
+            speakerEmbedding: encoded.speakerEmbedding,
+            referenceCodes: encoded.referenceCodes,
+            referenceCodeFrames: encoded.referenceCodeFrames,
+            referenceText: referenceText
+        )
+    }
+
     /// Release all model weights and the tokenizer from memory.
     ///
     /// Mirrors `WhisperKit.unloadModels()`. Transitions through `.unloading` before
@@ -566,6 +683,10 @@ open class TTSKit: @unchecked Sendable {
         codeDecoder.unloadModel()
         multiCodeDecoder.unloadModel()
         speechDecoder.unloadModel()
+        voiceCloneEncoder?.speakerEncoder.unloadModel()
+        voiceCloneEncoder?.speechEncoder?.unloadModel()
+        voiceCloneEncoder?.rvqEncoder?.unloadModel()
+        voiceCloneEncoder = nil
         tokenizer = nil
         modelState = .unloaded
         Logging.info("Unloaded all models")
@@ -785,8 +906,14 @@ open class TTSKit: @unchecked Sendable {
         let resolvedLanguage = language ?? primaryTask.defaultLanguage
 
         // Build prompt cache ahead of time if none exists or current doesn't match.
+        // Voice cloning bypasses the voice/language-keyed cache entirely: the ICL
+        // prefix embeds the per-utterance text, and the x-vector prefix is keyed by
+        // reference clip rather than `voice` - building a cache here would be wasted
+        // work that Qwen3GenerateTask ignores anyway.
         let cache: TTSPromptCache?
-        if let existing = promptCache, existing.matches(voice: resolvedVoice, language: resolvedLanguage, instruction: options.instruction) {
+        if options.voiceClone != nil {
+            cache = nil
+        } else if let existing = promptCache, existing.matches(voice: resolvedVoice, language: resolvedLanguage, instruction: options.instruction) {
             cache = existing
         } else if tokenizer != nil {
             cache = try await buildPromptCache(voice: resolvedVoice, language: resolvedLanguage, instruction: options.instruction)

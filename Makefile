@@ -9,7 +9,7 @@ PYTHON_COMMAND := python3
 MODEL_REPO := argmaxinc/whisperkit-coreml
 MODEL_REPO_DIR := ./Models/whisperkit-coreml
 TTS_MODEL_REPO := argmaxinc/ttskit-coreml
-TTS_MODEL_REPO_DIR := ./Models/ttskit-coreml
+TTS_MODEL_REPO_DIR := ./Models/$(notdir $(TTS_MODEL_REPO))
 SPEAKERKIT_MODEL_REPO := argmaxinc/speakerkit-coreml
 SPEAKERKIT_MODEL_REPO_DIR := ./Models/speakerkit-coreml
 BASE_COMPILED_DIR := ./Models
@@ -144,15 +144,23 @@ download-tts-models: setup-tts-model-repo
 # Download a specific TTS model size
 # Usage: make download-tts-model MODEL=0.6b
 #        make download-tts-model MODEL=1.7b
+#        make download-tts-model MODEL=0.6b-base
+# Base variants map to the 12hz-<MODEL> version dir and include the voice-clone
+# encoders (speaker_encoder, speech_encoder, speech_encoder_rvq) via the
+# component wildcard. Override the source repo with TTS_MODEL_REPO=<org>/<repo>.
 download-tts-model: setup-tts-model-repo
 	@if [ -z "$(MODEL)" ]; then \
 		echo "Error: MODEL not set. Usage: make download-tts-model MODEL=0.6b"; \
-		echo "Available models: 0.6b, 1.7b"; \
+		echo "Available models: 0.6b, 1.7b, 0.6b-base"; \
 		exit 1; \
 	fi
 	@echo "Downloading TTS model $(MODEL)..."
-	@cd $(TTS_MODEL_REPO_DIR) && \
-	git lfs pull --include="qwen3_tts/*/12hz-$(MODEL)-customvoice/**"
+	@case "$(MODEL)" in \
+		*-base) VERSION_DIR="12hz-$(MODEL)";; \
+		*) VERSION_DIR="12hz-$(MODEL)-customvoice";; \
+	esac; \
+	cd $(TTS_MODEL_REPO_DIR) && \
+	git lfs pull --include="qwen3_tts/*/$$VERSION_DIR/**"
 
 build:
 	@echo "Building argmax-oss-swift..."
