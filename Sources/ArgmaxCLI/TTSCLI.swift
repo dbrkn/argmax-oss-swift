@@ -130,6 +130,15 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "TextProjector variant (overrides --model preset)")
     var textProjectorVariant: String?
 
+    @Option(name: .long, help: "SpeakerEncoder variant for voice cloning (e.g. W16A16-15s for longer references)")
+    var speakerEncoderVariant: String?
+
+    @Option(name: .long, help: "SpeechEncoder variant for voice cloning (e.g. W16A16-15s for longer references)")
+    var speechEncoderVariant: String?
+
+    @Option(name: .long, help: "SpeechEncoderRVQ variant for voice cloning (must match --speech-encoder-variant window)")
+    var speechEncoderRVQVariant: String?
+
     @Option(name: .long, help: "SpeechDecoder mode: latencyOptimized (default, lowest time-to-first-audio, 1 frame/call) or throughputOptimized (higher throughput, ~4x larger pre-buffer, 4 frames/call)")
     var speechDecoderMode: Qwen3SpeechDecoderMode = .latencyOptimized
 
@@ -209,6 +218,9 @@ struct TTSCLI: AsyncParsableCommand {
             multiCodeEmbedderVariant: multiCodeEmbedderVariant,
             textProjectorVariant: textProjectorVariant,
             speechDecoderVariant: speechDecoderVariant,
+            speakerEncoderVariant: speakerEncoderVariant,
+            speechEncoderVariant: speechEncoderVariant,
+            speechEncoderRVQVariant: speechEncoderRVQVariant,
             speechDecoderMode: speechDecoderMode,
             computeOptions: ComputeOptions(
                 embedderComputeUnits: embedderComputeUnits.asMLComputeUnits,
