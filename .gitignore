@@ -1,5 +1,6 @@
 .DS_Store
 /.build
+/Extensions/TTSKitMLX/.build
 /Packages
 .vscode/
 xcuserdata/
