@@ -130,6 +130,9 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "TextProjector variant (overrides --model preset)")
     var textProjectorVariant: String?
 
+    @Option(name: .customLong("voice-clone-prompt"), help: "Precomputed VoiceClonePrompt JSON (e.g. from ttskit-mlx-cli encode); mutually exclusive with --ref-audio")
+    var voiceClonePromptPath: String?
+
     @Option(name: .long, help: "SpeakerEncoder variant for voice cloning (e.g. W16A16-15s for longer references)")
     var speakerEncoderVariant: String?
 
@@ -179,6 +182,9 @@ struct TTSCLI: AsyncParsableCommand {
         }
 
         // Validate voice-clone flag combinations.
+        if voiceClonePromptPath != nil, refAudio != nil {
+            throw ValidationError("--voice-clone-prompt and --ref-audio are mutually exclusive")
+        }
         if refAudio == nil {
             if refText != nil {
                 throw ValidationError("--ref-text requires --ref-audio")
@@ -191,8 +197,9 @@ struct TTSCLI: AsyncParsableCommand {
         }
 
         // Voice cloning needs the base-family checkpoints; default to 0.6b-base
-        // when --ref-audio is set and no explicit --model was given.
-        let model = self.model ?? (refAudio != nil ? .qwen3TTS_0_6b_base : .qwen3TTS_0_6b)
+        // when cloning is requested and no explicit --model was given.
+        let isCloning = refAudio != nil || voiceClonePromptPath != nil
+        let model = self.model ?? (isCloning ? .qwen3TTS_0_6b_base : .qwen3TTS_0_6b)
 
         // Resolve local models path if provided
         let resolvedModelFolder: URL? = modelsPath.map {
@@ -300,6 +307,11 @@ struct TTSCLI: AsyncParsableCommand {
                 referenceText: refText,
                 xVectorOnly: xVectorOnly
             )
+        } else if let voiceClonePromptPath {
+            // Precomputed prompt (any encoder — e.g. the MLX extension's
+            // variable-length encoders, or a server-side export).
+            let promptURL = URL(fileURLWithPath: FileManager.resolveAbsolutePath(voiceClonePromptPath))
+            voiceClonePrompt = try JSONDecoder().decode(VoiceClonePrompt.self, from: Data(contentsOf: promptURL))
         }
 
         let options = GenerationOptions(
