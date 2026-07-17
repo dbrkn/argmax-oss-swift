@@ -111,3 +111,34 @@ loader is new but small).
 3. Local A/B vs Python `tts-cli` on a handful of `voiceclone-eval` samples.
 4. OpenBench Phase 2 (separate branch on the OpenBench fork + internal
    workflow input `pipeline=argmax-speech-generation-oss`).
+
+## Production impact: MLX vs CoreML encoders (measured)
+
+Measured on an M-series Mac (24 kHz mono references; encoders only — the
+talker/vocoder stay CoreML in both configurations):
+
+| Dimension | CoreML (W16A16, 10 s window, ANE) | MLX (fp32, GPU/Metal) |
+|---|---|---|
+| Encode latency | ~158 ms constant (fixed window) | ~5.4 ms/s of reference: 23 ms @3 s, 47 ms @8 s, 173 ms @32 s |
+| Reference > window | Silently truncated | Full length |
+| Load time | 41 s cold (first ANE compile), 4.8 s warm | 2.1 s |
+| Process RSS after load | +638 MB | +585 MB |
+| Peak accelerator memory | ~flat (window-bounded) | Scales ~90 MB per reference second (0.7 GB @3 s → 2.9 GB @32 s) |
+| Weights on disk | 124 MB | ~2.0 GB as published (only the speaker-encoder slice of the 1.3 GB talker file is used) |
+| Compute placement / power | ANE, ~2–5 W, leaves GPU free | GPU, ~15–40 W, contends with other Metal work |
+| Precision | fp16 | fp32 (matches the Python research reference) |
+
+Consequences:
+
+1. **Reference-length cap is a pre-ship requirement for the MLX path**: peak
+   memory grows unbounded with reference length (~27 GB for a 5-minute clip).
+   Cap (~120 s) with a clear error, or window the Mimi encode with left
+   context.
+2. **Per-process weights (~600 MB) are not page-shared** the way `mlmodelc`
+   mmaps are — multi-worker servers should route cloning through a single
+   encode service.
+3. **Pruned checkpoint before shipping**: publish an encoder-only safetensors
+   set (~750 MB) instead of the full 2 GB talker+tokenizer download.
+4. Placement is complementary (encode on GPU, generate on ANE); routing can be
+   automatic — CoreML for ≤10 s references / battery deployments, MLX beyond —
+   since both emit the identical `VoiceClonePrompt`.
