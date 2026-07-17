@@ -27,6 +27,8 @@ import numpy as np
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ref-audio", required=True)
+    parser.add_argument("--ref-text", default="", help="Reference transcript (bundled for integration tests)")
+    parser.add_argument("--synthesis-text", default="", help="Text to synthesize in integration tests")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--mel-frames", type=int, default=960, help="SpeakerEncoder mel window (frames)")
     parser.add_argument("--speech-window", type=int, default=240000, help="SpeechEncoder waveform window (samples)")
@@ -99,6 +101,8 @@ def main() -> None:
         "speechWindowSamples": args.speech_window,
         "numCodes": args.num_codes,
         "validFrames": valid_frames,
+        "referenceText": args.ref_text,
+        "synthesisText": args.synthesis_text,
     }
     (out / "goldens.json").write_text(json.dumps(goldens, indent=1))
     print(json.dumps(goldens, indent=1))

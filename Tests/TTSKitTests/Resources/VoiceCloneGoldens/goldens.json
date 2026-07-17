@@ -50,5 +50,7 @@
  "speakerTiles": 2,
  "speechWindowSamples": 240000,
  "numCodes": 125,
- "validFrames": 101
+ "validFrames": 101,
+ "referenceText": "ohh perfect i've added that to your email um before we finish up is there anything else that i can help you with today",
+ "synthesisText": "good afternoon you you've reached the national agriculture support hotline uh this is sarah speaking how can i assist you today"
 }

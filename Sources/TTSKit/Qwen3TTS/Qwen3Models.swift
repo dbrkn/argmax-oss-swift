@@ -183,12 +183,18 @@ public enum Qwen3Language: String, CaseIterable, Sendable {
 public enum Qwen3SpeechDecoderMode: String, Sendable, CaseIterable {
     case latencyOptimized
     case throughputOptimized
+    /// Load the asset's default (only) function. For single-function
+    /// SpeechDecoder assets (e.g. research exports), which have no named
+    /// `latency`/`throughput` functions.
+    case singleFunction
 
-    /// CoreML function name corresponding to this mode.
+    /// CoreML function name corresponding to this mode. Empty for
+    /// ``singleFunction`` — the loader skips function selection entirely.
     public var functionName: String {
         switch self {
             case .latencyOptimized: return "latency"
             case .throughputOptimized: return "throughput"
+            case .singleFunction: return ""
         }
     }
 }
