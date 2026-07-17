@@ -29,6 +29,7 @@ public enum Qwen3TTSConstants {
 
     public static let textPAD: Int32 = 151_671
     public static let textBOS: Int32 = 151_672
+    public static let textEOS: Int32 = 151_673
 
     // MARK: Vocabulary sizes
 

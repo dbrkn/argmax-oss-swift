@@ -12,7 +12,7 @@ import Foundation
 /// Produced by ``VoiceCloneEncoder/encode(_:includeReferenceCodes:)``, or
 /// constructed directly from precomputed values (e.g. encoded server-side, or
 /// exported from the Python reference implementation for parity testing).
-public struct VoiceClonePrompt: Sendable {
+public struct VoiceClonePrompt: Codable, Equatable, Sendable {
     /// ECAPA-TDNN x-vector, substituted into the speaker slot of the codec
     /// track (shape `(embeddingDim,)`).
     public let speakerEmbedding: [Float]
