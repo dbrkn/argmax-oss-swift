@@ -159,3 +159,32 @@ encoders are faster at every duration in Swift — the CoreML case for the
 encode step rests on power/ANE placement and asset size, not latency.
 Reproduce with:
 `ttskit-mlx-cli bench --ref-audio <ref> --coreml-models-dir <models>`.
+
+## MLX talker (CodeDecoder): batched ICL prefill
+
+The CoreML talker's `input_embeds` input is compiled for one position, so ICL
+prefixes (150–300+ tokens: reference transcript + synthesis text + reference
+RVQ frames) prefill sequentially — measured ~53 tok/s on the internal
+`W8A16-kv_len_256` asset, i.e. ~3 s of time-to-first-audio per chunk — and the
+compile-time KV length (256) caps prompt + generation (the standard 8 s test
+sample stops at 94 frames, "KV cache full"). `Extensions/TTSKitMLX` therefore
+also ships `MlxCodeDecoder`: the Qwen3 0.6B talker transformer + codec-0 head
+ported to MLX-Swift (8-bit quantized weights from the same mlx-community
+checkpoint the encoders use).
+
+Integration seam: `Qwen3GenerateTask.codeDecoder` is protocol-typed
+(`any CodeDecoding`) and `TTSKitConfig.codeDecoder` injects the override; a
+new optional `BatchPrefillCapable` protocol lets the task prefill the whole
+prefix in one forward when the decoder supports it (the CoreML path is
+untouched). Real KV lives in per-layer MLX arrays; the TTSKit `KVCache` is
+mirrored for `cacheLength`/`isFull` bookkeeping only.
+
+Measured (same 8 s reference / 322-token utterance, back-to-back release
+runs): prefill ~900 tok/s (~0.35 s for 322 tokens) vs ~53 tok/s CoreML;
+per-step decode at parity within run-to-run variance (56–79 ms vs 62–69 ms —
+the step is dominated by the CoreML MultiCodeDecoder/SpeechDecoder either
+way); generation no longer KV-capped (logical budget 1024 by default).
+Parity vs the Python MLX talker: prefill logits/hidden cosine 1.000000, 20/20
+greedy tokens exact (`TalkerParityTests`, goldens from
+`scripts/export_talker_goldens.py`). Full-clone entry point:
+`ttskit-mlx-cli tts --ref-audio ... --coreml-models-dir ...`.

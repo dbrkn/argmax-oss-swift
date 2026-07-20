@@ -14,9 +14,11 @@ struct TTSKitMLXCLI: AsyncParsableCommand {
         discussion: """
         Encodes reference audio of any length (up to the memory-safety cap) into a \
         VoiceClonePrompt JSON that `argmax-cli tts --voice-clone-prompt` consumes, \
-        bypassing the CoreML encoders' fixed reference window.
+        bypassing the CoreML encoders' fixed reference window. The `tts` subcommand \
+        runs the full clone in-process: MLX encoders + MLX talker (batched prefill) \
+        + CoreML for the remaining components.
         """,
-        subcommands: [EncodeCLI.self, BenchCLI.self]
+        subcommands: [EncodeCLI.self, TTSCLI.self, BenchCLI.self]
     )
 }
 

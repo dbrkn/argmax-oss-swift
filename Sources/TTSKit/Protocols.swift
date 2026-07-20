@@ -44,6 +44,25 @@ public protocol CodeDecoding: MLModelLoading {
     func makeState() -> Any?
 }
 
+// MARK: - Batch Prefill Capability
+
+/// Optional `CodeDecoding` capability: consume an entire prompt prefix in one
+/// forward pass instead of the default token-by-token prefill loop.
+///
+/// Backends with genuinely batched attention (e.g. the MLX code decoder in
+/// `Extensions/TTSKitMLX`) conform to this; the fixed-shape CoreML decoders do
+/// not (their `input_embeds` input is compiled for a single position).
+/// `Qwen3GenerateTask.prefillCodeDecoder` checks for the capability and uses
+/// one batched call when available.
+public protocol BatchPrefillCapable {
+    /// Prefill the full prompt prefix (oldest position first) in one call.
+    ///
+    /// Advances `cache` bookkeeping by `embeds.count` positions and returns the
+    /// decoder output for the last position, exactly as if the prefix had been
+    /// fed through `decode` one position at a time.
+    func prefill(embeds: [[FloatType]], cache: KVCache, state: Any?) async throws -> CodeDecoderOutput
+}
+
 // MARK: - Code Decoder Output
 
 public struct CodeDecoderOutput {
@@ -57,6 +76,22 @@ public struct CodeDecoderOutput {
     /// Time spent on KV cache update inside the decoder (async path only). Lets callers
     /// subtract this from total decode time to isolate pure prediction cost.
     public var internalCacheUpdateTime: TimeInterval = 0
+
+    /// Public memberwise initializer so external `CodeDecoding` implementations
+    /// (e.g. the MLX code decoder in `Extensions/TTSKitMLX`) can construct outputs.
+    public init(
+        logits: any EmbedTensorType,
+        hiddenStates: any EmbedTensorType,
+        keyCacheUpdates: MLMultiArray?,
+        valueCacheUpdates: MLMultiArray?,
+        internalCacheUpdateTime: TimeInterval = 0
+    ) {
+        self.logits = logits
+        self.hiddenStates = hiddenStates
+        self.keyCacheUpdates = keyCacheUpdates
+        self.valueCacheUpdates = valueCacheUpdates
+        self.internalCacheUpdateTime = internalCacheUpdateTime
+    }
 }
 
 // MARK: - Multi-Code Decoder Output
