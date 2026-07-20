@@ -34,6 +34,17 @@ final class SpeechStreamWriter<Decoder: SpeechDecoding & Sendable> {
     /// RVQ frames accumulated since the last flush (length `0..<codesPerStep`).
     private var rvqBuffer: [[Int32]] = []
 
+    /// Number of recent frames re-decoded to prime a fresh cache when the
+    /// SpeechDecoder KV cache fills (rounded down to a multiple of
+    /// `codesPerStep`). Mirrors the Python reference's windowed decode
+    /// (`left_context=25`): without this, generations longer than the cache
+    /// window silently drop KV positions and degrade the audio tail.
+    private let reprimeContextFrames: Int
+    /// Sliding history of the most recently *submitted* frames, ≥ `reprimeContextFrames`.
+    private var recentFrames: [[Int32]] = []
+    /// Number of cache re-primes performed (long generations only); surfaced in logs.
+    private(set) var cacheReprimes = 0
+
     /// In-flight overlapped SpeechDecoder decode awaiting its drain on the next flush.
     private var pendingDecode: (
         task: Task<SpeechDecoderTimedResult, Error>,
@@ -59,6 +70,7 @@ final class SpeechStreamWriter<Decoder: SpeechDecoding & Sendable> {
         // Cache geometry comes straight from the decoder — no need to thread it in.
         self.codesPerStep = speechDecoder.codesPerStep
         self.samplesPerFrame = speechDecoder.samplesPerFrame
+        self.reprimeContextFrames = max(speechDecoder.codesPerStep, 24 / speechDecoder.codesPerStep * speechDecoder.codesPerStep)
         rvqBuffer.reserveCapacity(speechDecoder.codesPerStep)
     }
 
@@ -79,6 +91,7 @@ final class SpeechStreamWriter<Decoder: SpeechDecoding & Sendable> {
         // Drain the previous in-flight SD (if any) before kicking off a new one —
         // its execution overlapped with this step's CD/MCD work.
         guard try await drainPendingDecode(loopTimings: &loopTimings) else { return false }
+        try await reprimeCacheIfNeeded(loopTimings: &loopTimings)
         return try await submitDecode(stepStart: stepStart, loopTimings: &loopTimings)
     }
 
@@ -92,6 +105,7 @@ final class SpeechStreamWriter<Decoder: SpeechDecoding & Sendable> {
     func finish(loopTimings: inout SpeechTimings) async throws -> Bool {
         guard try await drainPendingDecode(loopTimings: &loopTimings) else { return false }
         guard !rvqBuffer.isEmpty else { return true }
+        try await reprimeCacheIfNeeded(loopTimings: &loopTimings)
 
         let padCount = max(0, codesPerStep - rvqBuffer.count)
         var toSubmit = rvqBuffer
@@ -118,6 +132,46 @@ final class SpeechStreamWriter<Decoder: SpeechDecoding & Sendable> {
 
     // MARK: - Decode submission / drain
 
+    /// Keep a bounded history of submitted frames for cache re-priming.
+    private func recordSubmittedFrames(_ frames: [[Int32]]) {
+        recentFrames.append(contentsOf: frames)
+        if recentFrames.count > reprimeContextFrames {
+            recentFrames.removeFirst(recentFrames.count - reprimeContextFrames)
+        }
+    }
+
+    /// When the next decode would overflow the SpeechDecoder KV cache, reset it
+    /// and re-decode the last `reprimeContextFrames` frames to rebuild real
+    /// context (their audio is discarded — it was already emitted). The window
+    /// boundary matches the Python reference's chunked decode; the ~`context /
+    /// window` extra decode cost only applies to generations longer than the
+    /// cache window (~21 s for the kv_len_256 asset).
+    ///
+    /// Callers must have drained `pendingDecode` first (the re-prime mutates
+    /// `sdCache`).
+    private func reprimeCacheIfNeeded(loopTimings: inout SpeechTimings) async throws {
+        guard sdCache.isFull else { return }
+        let context = recentFrames.suffix(reprimeContextFrames)
+        sdCache.reset()
+        cacheReprimes += 1
+        Logging.info(
+            "SpeechDecoder KV cache full: re-priming a fresh cache with \(context.count) context frames "
+                + "(re-prime #\(cacheReprimes))"
+        )
+        var group: [[Int32]] = []
+        group.reserveCapacity(codesPerStep)
+        for frame in context {
+            group.append(frame)
+            guard group.count == codesPerStep else { continue }
+            let result = try await speechDecoder.decodeFrameAsync(codes: group, cache: sdCache)
+            loopTimings.speechDecoderPredictions += result.timings.speechDecoderPredictions
+            loopTimings.speechDecoder += result.timings.speechDecoderPredictions
+            group.removeAll(keepingCapacity: true)
+        }
+        // `reprimeContextFrames` is a multiple of `codesPerStep`, so `group` is
+        // empty here unless the history is still shorter than one step group.
+    }
+
     /// Await the in-flight decode (if any) and emit its buffer.
     /// Required before submitting a new decode so `sdCache` mutations stay ordered.
     private func drainPendingDecode(loopTimings: inout SpeechTimings) async throws -> Bool {
@@ -142,6 +196,7 @@ final class SpeechStreamWriter<Decoder: SpeechDecoding & Sendable> {
     private func submitDecode(stepStart: CFAbsoluteTime, loopTimings: inout SpeechTimings) async throws -> Bool {
         let snapshot = rvqBuffer
         rvqBuffer.removeAll(keepingCapacity: true)
+        recordSubmittedFrames(snapshot)
 
         if !hasEmittedFirstBuffer {
             let result = try await speechDecoder.decodeFrameAsync(codes: snapshot, cache: sdCache)
