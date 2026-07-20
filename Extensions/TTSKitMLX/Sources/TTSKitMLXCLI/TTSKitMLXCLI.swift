@@ -7,7 +7,7 @@ import TTSKit
 import TTSKitMLX
 
 @main
-struct TTSKitMLXCLI: ParsableCommand {
+struct TTSKitMLXCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ttskit-mlx-cli",
         abstract: "MLX voice-clone encoders for TTSKit (Mac-only)",
@@ -16,7 +16,7 @@ struct TTSKitMLXCLI: ParsableCommand {
         VoiceClonePrompt JSON that `argmax-cli tts --voice-clone-prompt` consumes, \
         bypassing the CoreML encoders' fixed reference window.
         """,
-        subcommands: [EncodeCLI.self]
+        subcommands: [EncodeCLI.self, BenchCLI.self]
     )
 }
 

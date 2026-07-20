@@ -143,3 +143,19 @@ Consequences:
 4. Placement is complementary (encode on GPU, generate on ANE); routing can be
    automatic — CoreML for ≤10 s references / battery deployments, MLX beyond —
    since both emit the identical `VoiceClonePrompt`.
+
+### Swift-side encode latency (ttskit-mlx-cli bench, M-series, best of 3)
+
+| clip | CoreML (ANE, W16A16-10s) | MLX (GPU, variable) |
+|---|---|---|
+| 3 s | 144 ms | **16 ms** |
+| 8 s | 150 ms | **34 ms** |
+| 15 s | 149 ms (truncates) | **59 ms** |
+| 32 s | 153 ms (truncates) | **123 ms** |
+
+Loads: CoreML ~34 s cold (ANE prepare; ~5 s warm), MLX ~0 s at init with
+weights materializing on first encode (~2 s, absorbed by warmup). The MLX
+encoders are faster at every duration in Swift — the CoreML case for the
+encode step rests on power/ANE placement and asset size, not latency.
+Reproduce with:
+`ttskit-mlx-cli bench --ref-audio <ref> --coreml-models-dir <models>`.
