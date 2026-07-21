@@ -270,7 +270,19 @@ struct TTSCLI: AsyncParsableCommand {
         }
 
         // Default: --play uses sequential (1), file output uses unlimited (0).
-        let effectiveWorkerCount = concurrentWorkerCount ?? (play ? 1 : 0)
+        var effectiveWorkerCount = concurrentWorkerCount ?? (play ? 1 : 0)
+
+        // The MLX talker keeps one private KV cache per decoder instance, so
+        // concurrent chunk workers interleave prefills and corrupt it
+        // (broadcast_shapes / retain-count crashes). Serialize generation on
+        // the mlx backend — this also matches the Python prototype, which
+        // synthesizes chunks sequentially.
+        if codeDecoderBackend == "mlx", effectiveWorkerCount != 1 {
+            if concurrentWorkerCount != nil {
+                print("Warning: --code-decoder-backend mlx supports sequential generation only; forcing --concurrent-worker-count 1.")
+            }
+            effectiveWorkerCount = 1
+        }
 
         // Always use a seed for reproducibility -- generate one if not provided
         let effectiveSeed = seed ?? UInt64.random(in: 0...UInt64(UInt32.max))
