@@ -1,4 +1,4 @@
-.PHONY: setup setup-huggingface-cli setup-model-repo download-models download-model download-speakerkit-models build build-cli test \
+.PHONY: setup setup-huggingface-cli setup-model-repo download-models download-model download-speakerkit-models build build-cli graft-mlx-metallib test \
  		clean-package-caches list-devices benchmark-connected-devices benchmark-device benchmark-devices \
 		extract-xcresult build-local-server generate-server generate-server-spec generate-server-code
 
@@ -9,7 +9,7 @@ PYTHON_COMMAND := python3
 MODEL_REPO := argmaxinc/whisperkit-coreml
 MODEL_REPO_DIR := ./Models/whisperkit-coreml
 TTS_MODEL_REPO := argmaxinc/ttskit-coreml
-TTS_MODEL_REPO_DIR := ./Models/ttskit-coreml
+TTS_MODEL_REPO_DIR := ./Models/$(notdir $(TTS_MODEL_REPO))
 SPEAKERKIT_MODEL_REPO := argmaxinc/speakerkit-coreml
 SPEAKERKIT_MODEL_REPO_DIR := ./Models/speakerkit-coreml
 BASE_COMPILED_DIR := ./Models
@@ -144,15 +144,23 @@ download-tts-models: setup-tts-model-repo
 # Download a specific TTS model size
 # Usage: make download-tts-model MODEL=0.6b
 #        make download-tts-model MODEL=1.7b
+#        make download-tts-model MODEL=0.6b-base
+# Base variants map to the 12hz-<MODEL> version dir and include the voice-clone
+# encoders (speaker_encoder, speech_encoder, speech_encoder_rvq) via the
+# component wildcard. Override the source repo with TTS_MODEL_REPO=<org>/<repo>.
 download-tts-model: setup-tts-model-repo
 	@if [ -z "$(MODEL)" ]; then \
 		echo "Error: MODEL not set. Usage: make download-tts-model MODEL=0.6b"; \
-		echo "Available models: 0.6b, 1.7b"; \
+		echo "Available models: 0.6b, 1.7b, 0.6b-base"; \
 		exit 1; \
 	fi
 	@echo "Downloading TTS model $(MODEL)..."
-	@cd $(TTS_MODEL_REPO_DIR) && \
-	git lfs pull --include="qwen3_tts/*/12hz-$(MODEL)-customvoice/**"
+	@case "$(MODEL)" in \
+		*-base) VERSION_DIR="12hz-$(MODEL)";; \
+		*) VERSION_DIR="12hz-$(MODEL)-customvoice";; \
+	esac; \
+	cd $(TTS_MODEL_REPO_DIR) && \
+	git lfs pull --include="qwen3_tts/*/$$VERSION_DIR/**"
 
 build:
 	@echo "Building argmax-oss-swift..."
@@ -162,6 +170,20 @@ build:
 build-cli:
 	@echo "Building Argmax CLI..."
 	@swift build -c release --product argmax-cli
+
+
+# Only needed to RUN `argmax-cli tts --voice-clone-encoder-backend mlx`:
+# command-line SwiftPM cannot compile mlx-swift's Metal shaders (the binary
+# fails at runtime with "Failed to load the default metallib"), while
+# xcodebuild compiles them into the mlx-swift_Cmlx.bundle. Build the bundle
+# once via xcodebuild and graft it next to the SwiftPM release binary. The
+# default coreml backend does not need this.
+graft-mlx-metallib:
+	@echo "Building mlx-swift Metal shader bundle via xcodebuild..."
+	@xcodebuild build -scheme argmax-cli -destination platform=macOS -derivedDataPath .build/xcode -quiet
+	@mkdir -p .build/arm64-apple-macosx/release
+	@cp -R .build/xcode/Build/Products/Debug/mlx-swift_Cmlx.bundle .build/arm64-apple-macosx/release/
+	@echo "Grafted mlx-swift_Cmlx.bundle into .build/arm64-apple-macosx/release/"
 
 
 test:

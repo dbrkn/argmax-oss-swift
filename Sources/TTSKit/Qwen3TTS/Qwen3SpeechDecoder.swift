@@ -62,16 +62,20 @@ public class Qwen3SpeechDecoder: SpeechDecoding, @unchecked Sendable {
                 "SpeechDecoder requires macOS 15 / iOS 18 (multifunction CoreML model)"
             )
         }
-        modelConfig.functionName = mode.functionName
+        if mode != .singleFunction {
+            modelConfig.functionName = mode.functionName
+        }
         let loaded: MLModel
         do {
             loaded = try await MLModel.load(contentsOf: url, configuration: modelConfig)
         } catch {
+            let functionHint = mode == .singleFunction
+                ? "the asset's default function"
+                : "function '\(mode.functionName)' (multifunction asset with 'latency' and 'throughput' functions required)"
             throw TTSError.modelLoadingFailed(
-                "SpeechDecoder: failed to load function '\(mode.functionName)' from " +
-                "\(url.lastPathComponent). This must be a multifunction CoreML asset " +
-                "with 'latency' and 'throughput' functions, running on macOS 15 / iOS 18 " +
-                "or newer. (\(error.localizedDescription))"
+                "SpeechDecoder: failed to load \(functionHint) from " +
+                "\(url.lastPathComponent) on macOS 15 / iOS 18 or newer. " +
+                "(\(error.localizedDescription))"
             )
         }
 

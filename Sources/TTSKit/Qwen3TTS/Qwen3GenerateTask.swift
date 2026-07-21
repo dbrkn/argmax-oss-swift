@@ -151,7 +151,19 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         let cdState = codeDecoder.makeState()
 
         // Phase 1: Tokenize text and build initial embeddings
-        let tokenizeResult = try await tokenizeAndBuildEmbeds(text: text)
+        var tokenizeResult = try await tokenizeAndBuildEmbeds(text: text)
+        if options.voiceClone?.referenceCodes != nil {
+            // ICL voice clone bakes the full synthesis text into the prefix;
+            // the generation loop sees text PAD on every step.
+            tokenizeResult = TokenizeResult(
+                textTokenIds: tokenizeResult.textTokenIds,
+                trailingTextTokens: [],
+                firstTextEmbed: tokenizeResult.firstTextEmbed,
+                variableEmbed: tokenizeResult.variableEmbed,
+                textPadEmbed: tokenizeResult.textPadEmbed,
+                timings: tokenizeResult.timings
+            )
+        }
         timings.merge(tokenizeResult.timings)
 
         // Phase 2: Prefill the CodeDecoder with the prompt prefix
@@ -248,7 +260,11 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             isStateful: codeDecoder.isStateful
         )
 
-        let usedCache = prefixCache?.matches(voice: voice, language: language, instruction: options.instruction) == true
+        // Voice cloning never uses the speaker-keyed prompt cache: the ICL
+        // prefix embeds the per-utterance text, and the x-vector prefix is
+        // keyed by reference clip, not by `voice`.
+        let usedCache = options.voiceClone == nil
+            && prefixCache?.matches(voice: voice, language: language, instruction: options.instruction) == true
         var totalPrefillTokens: Int
         var lastCdOutput: CodeDecoderOutput?
 
@@ -272,12 +288,27 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             }
         } else {
             let embedDim = codeDecoder.embedSize
-            let combinedEmbeds = try await buildCombinedEmbeddings(
-                speaker: speaker, lang: lang,
-                instruction: options.instruction,
-                firstTextEmbed: tokenizeResult.firstTextEmbed,
-                embedDim: embedDim
-            )
+            let combinedEmbeds: [[FloatType]]
+            if let clone = options.voiceClone, clone.referenceCodes != nil {
+                combinedEmbeds = try await buildVoiceCloneICLEmbeddings(
+                    prompt: clone,
+                    referenceText: clone.referenceText ?? "",
+                    lang: lang,
+                    instruction: options.instruction,
+                    textTokenIds: tokenizeResult.textTokenIds,
+                    embedDim: embedDim
+                )
+            } else {
+                combinedEmbeds = try await buildCombinedEmbeddings(
+                    speaker: speaker, lang: lang,
+                    instruction: options.instruction,
+                    firstTextEmbed: tokenizeResult.firstTextEmbed,
+                    embedDim: embedDim,
+                    speakerEmbeddingOverride: options.voiceClone.map { clone in
+                        clone.speakerEmbedding.map { FloatType($0) }
+                    }
+                )
+            }
             totalPrefillTokens = combinedEmbeds.count
 
             // TODO: Remove forking logic with package with min os version upgrade
@@ -599,7 +630,8 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         lang: Qwen3Language,
         instruction: String?,
         firstTextEmbed: [FloatType],
-        embedDim: Int
+        embedDim: Int,
+        speakerEmbeddingOverride: [FloatType]? = nil
     ) async throws -> [[FloatType]] {
         let zeroCodecEmbed = EmbedUtilities.zeroEmbed(dim: embedDim)
 
@@ -635,8 +667,19 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             Qwen3TTSConstants.codecBOS
         ]
         var codecTrackEmbeds: [[FloatType]] = []
-        for codecId in codecIds {
-            try await codecTrackEmbeds.append(codeEmbedder.embed(tokenId: codecId))
+        for (slot, codecId) in codecIds.enumerated() {
+            // Slot 4 is the speaker slot; x-vector-only voice cloning replaces
+            // the speaker token's embedding with the reference clip's x-vector.
+            if slot == 4, let speakerEmbeddingOverride {
+                guard speakerEmbeddingOverride.count == embedDim else {
+                    throw TTSError.invalidConfiguration(
+                        "Speaker embedding dim \(speakerEmbeddingOverride.count) != decoder embed dim \(embedDim)"
+                    )
+                }
+                codecTrackEmbeds.append(speakerEmbeddingOverride)
+            } else {
+                try await codecTrackEmbeds.append(codeEmbedder.embed(tokenId: codecId))
+            }
         }
 
         let numPads = codecIds.count - 2

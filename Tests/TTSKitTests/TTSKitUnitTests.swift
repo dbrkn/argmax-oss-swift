@@ -944,6 +944,42 @@ final class TTSKitUnitTests: XCTestCase {
         XCTAssertEqual(TTSModelVariant.qwen3TTS_0_6b.speechDecoderVariant, Qwen3VariantDefaults.speechDecoder)
     }
 
+    func testBaseModelPresetVariantDefaults() {
+        // The -base presets map to the published base-family variant layout
+        // (explicit KV-length talker caches, W16A16 text projector,
+        // single-function speech decoder) for both model sizes.
+        for preset in [TTSModelVariant.qwen3TTS_0_6b_base, .qwen3TTS_1_7b_base] {
+            XCTAssertTrue(preset.isBaseVariant)
+            XCTAssertEqual(preset.codeDecoderVariant, Qwen3VariantDefaults.baseCodeDecoder)
+            XCTAssertEqual(preset.multiCodeDecoderVariant, Qwen3VariantDefaults.baseMultiCodeDecoder)
+            XCTAssertEqual(preset.textProjectorVariant, Qwen3VariantDefaults.baseTextProjector)
+            XCTAssertEqual(preset.speechDecoderVariant, Qwen3VariantDefaults.baseSpeechDecoder)
+        }
+        XCTAssertFalse(TTSModelVariant.qwen3TTS_0_6b.isBaseVariant)
+        XCTAssertFalse(TTSModelVariant.qwen3TTS_1_7b.isBaseVariant)
+        XCTAssertEqual(TTSModelVariant.qwen3TTS_1_7b_base.versionDir, "12hz-1.7b-base")
+    }
+
+    func testDownloadPatternsFollowConfiguredVariants() {
+        // The download must fetch exactly what loadModels()/loadVoiceCloneModels()
+        // will resolve: explicit overrides show up in the patterns verbatim.
+        let config = TTSKitConfig(
+            model: .qwen3TTS_0_6b_base,
+            codeDecoderVariant: "W8A16-kv_len_512",
+            textProjectorVariant: "W16A16",
+            speakerEncoderVariant: "W16A16-15s",
+            speechEncoderVariant: "W16A16-15s",
+            speechEncoderRVQVariant: "W16A16-15s"
+        )
+        XCTAssertTrue(config.downloadPatterns.contains("qwen3_tts/text_projector/12hz-0.6b-base/W16A16/**"))
+        XCTAssertTrue(config.downloadPatterns.contains("qwen3_tts/code_decoder/12hz-0.6b-base/W8A16-kv_len_512/**"))
+        XCTAssertEqual(config.voiceCloneDownloadPatterns, [
+            "qwen3_tts/speaker_encoder/12hz-0.6b-base/W16A16-15s/**",
+            "qwen3_tts/speech_encoder/12hz-0.6b-base/W16A16-15s/**",
+            "qwen3_tts/speech_encoder_rvq/12hz-0.6b-base/W16A16-15s/**"
+        ])
+    }
+
     // MARK: - TTSKitConfig Component Overrides
 
     func testTTSKitConfigComponentOverridesNilByDefault() {
