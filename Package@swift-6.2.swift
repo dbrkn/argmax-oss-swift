@@ -8,7 +8,7 @@ let package = Package(
     name: "argmax-oss-swift",
     platforms: [
         .iOS(.v16),
-        .macOS(.v13),
+        .macOS(.v14),
         .watchOS(.v10),
         .visionOS(.v1)
     ],
@@ -30,6 +30,10 @@ let package = Package(
             targets: ["SpeakerKit"]
         ),
         .library(
+            name: "TTSKitMLX",
+            targets: ["TTSKitMLX"]
+        ),
+        .library(
             name: "ArgmaxOSSDynamic",
             type: .dynamic,
             targets: ["ArgmaxOSS"]
@@ -45,6 +49,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
+        // 0.31.5+ requires swift-tools 6.3; 0.31.4 is the newest release that
+        // builds with the Xcode 26.0 toolchain (Swift 6.2).
+        .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.31.4"),
     ] + (isServerEnabled() ? [
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.1"),
         .package(url: "https://github.com/apple/swift-openapi-generator", from: "1.10.2"),
@@ -88,6 +95,21 @@ let package = Package(
             ],
             swiftSettings: swiftSettings()
         ),
+        // MLX talker backend for TTSKit voice cloning. The MLX products are
+        // macOS-only (mlx-swift has no watchOS support); on other platforms
+        // the target compiles empty behind `#if canImport(MLX)`. No library
+        // evolution: mlx-swift modules are not resilient, so this target is
+        // excluded from the binary-framework (xcframework) surface.
+        .target(
+            name: "TTSKitMLX",
+            dependencies: [
+                "TTSKit",
+                .product(name: "MLX", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+                .product(name: "MLXNN", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+                .product(name: "MLXFast", package: "mlx-swift", condition: .when(platforms: [.macOS])),
+            ],
+            swiftSettings: swiftSettings(libraryEvolution: false)
+        ),
         .testTarget(
             name: "ArgmaxCoreTests",
             dependencies: [
@@ -128,12 +150,20 @@ let package = Package(
             ],
             swiftSettings: swiftSettings(libraryEvolution: false)
         ),
+        .testTarget(
+            name: "TTSKitMLXTests",
+            dependencies: [
+                .target(name: "TTSKitMLX", condition: .when(platforms: [.macOS])),
+            ],
+            swiftSettings: swiftSettings(libraryEvolution: false)
+        ),
         .executableTarget(
             name: "ArgmaxCLI",
             dependencies: [
                 "WhisperKit",
                 "TTSKit",
                 "SpeakerKit",
+                .target(name: "TTSKitMLX", condition: .when(platforms: [.macOS])),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ] + (isServerEnabled() ? [
                 .product(name: "Vapor", package: "vapor"),
