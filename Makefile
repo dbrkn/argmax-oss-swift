@@ -1,4 +1,4 @@
-.PHONY: setup setup-huggingface-cli setup-model-repo download-models download-model download-speakerkit-models build build-cli test \
+.PHONY: setup setup-huggingface-cli setup-model-repo download-models download-model download-speakerkit-models build build-cli graft-mlx-metallib test \
  		clean-package-caches list-devices benchmark-connected-devices benchmark-device benchmark-devices \
 		extract-xcresult build-local-server generate-server generate-server-spec generate-server-code
 
@@ -170,6 +170,20 @@ build:
 build-cli:
 	@echo "Building Argmax CLI..."
 	@swift build -c release --product argmax-cli
+
+
+# Only needed to RUN `argmax-cli tts --code-decoder-backend mlx`: command-line
+# SwiftPM cannot compile mlx-swift's Metal shaders (the binary fails at runtime
+# with "Failed to load the default metallib"), while xcodebuild compiles them
+# into the mlx-swift_Cmlx.bundle. Build the bundle once via xcodebuild and
+# graft it next to the SwiftPM release binary. The default coreml backend does
+# not need this.
+graft-mlx-metallib:
+	@echo "Building mlx-swift Metal shader bundle via xcodebuild..."
+	@xcodebuild build -scheme argmax-cli -destination platform=macOS -derivedDataPath .build/xcode -quiet
+	@mkdir -p .build/arm64-apple-macosx/release
+	@cp -R .build/xcode/Build/Products/Debug/mlx-swift_Cmlx.bundle .build/arm64-apple-macosx/release/
+	@echo "Grafted mlx-swift_Cmlx.bundle into .build/arm64-apple-macosx/release/"
 
 
 test:

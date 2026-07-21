@@ -5,6 +5,9 @@ import ArgumentParser
 import CoreML
 import Foundation
 import TTSKit
+#if canImport(TTSKitMLX)
+import TTSKitMLX
+#endif
 import WhisperKit
 
 // MARK: - CLI-only conformances for ArgumentParser
@@ -142,6 +145,17 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "SpeechDecoder mode: latencyOptimized (lowest time-to-first-audio, 1 frame/call), throughputOptimized (higher throughput, ~4x larger pre-buffer, 4 frames/call), or singleFunction (single-function assets, e.g. the base-family speech decoders). Defaults to latencyOptimized, or singleFunction for -base model presets.")
     var speechDecoderMode: Qwen3SpeechDecoderMode?
 
+    // MARK: - CodeDecoder backend
+
+    @Option(name: .long, help: "CodeDecoder (talker) backend: coreml (default) | mlx — MLX talker with batched ICL prefill and no KV cap; macOS 14+, requires the Base-family mlx-community checkpoint in the local HF cache")
+    var codeDecoderBackend: String = "coreml"
+
+    @Option(name: .long, help: "Qwen3-TTS MLX checkpoint snapshot directory for the talker (default: the cached HF snapshot of the Base-family mlx-community repo)")
+    var mlxModelDir: String?
+
+    @Option(name: .long, help: "MLX talker KV budget in positions (prompt + generated frames)")
+    var mlxMaxSequenceLength: Int = 1024
+
     // MARK: - Compute unit options
 
     @Option(name: .long, help: "Compute units for embedders (TextProjector, CodeEmbedder, MultiCodeEmbedder) {all,cpuOnly,cpuAndGPU,cpuAndNeuralEngine}")
@@ -236,6 +250,23 @@ struct TTSCLI: AsyncParsableCommand {
         // `loadVoiceCloneModels()`); include them in the model download.
         if refAudio != nil {
             config.downloadAdditionalPatterns += config.voiceCloneDownloadPatterns
+        }
+
+        // Swap the CoreML CodeDecoder (talker) for the MLX backend if requested.
+        switch codeDecoderBackend {
+            case "coreml":
+                break
+            case "mlx":
+                #if canImport(TTSKitMLX)
+                config.codeDecoder = try makeMlxCodeDecoder(
+                    modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) },
+                    maxSequenceLength: mlxMaxSequenceLength
+                )
+                #else
+                throw ValidationError("--code-decoder-backend mlx is not available on this platform (requires macOS 14+ with MLX support)")
+                #endif
+            default:
+                throw ValidationError("Unknown --code-decoder-backend '\(codeDecoderBackend)' (expected coreml or mlx)")
         }
 
         // Default: --play uses sequential (1), file output uses unlimited (0).
