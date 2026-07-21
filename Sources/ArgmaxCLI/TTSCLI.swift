@@ -93,8 +93,11 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Voice-clone reference encoder backend: coreml (default, fixed 10/15s reference windows, ANE) | mlx (variable-length references, GPU, macOS 14+; requires the Base-family mlx-community checkpoint in the local HF cache)")
     var voiceCloneEncoderBackend: String = "coreml"
 
-    @Option(name: .long, help: "Qwen3-TTS MLX checkpoint snapshot directory for the mlx encoder backend (default: the cached HF snapshot of the Base-family mlx-community repo)")
+    @Option(name: .long, help: "Qwen3-TTS MLX checkpoint snapshot directory, shared by the mlx encoder and talker backends (default: the cached HF snapshot of the Base-family mlx-community repo)")
     var mlxModelDir: String?
+
+    @Option(name: .long, help: "Reference-duration cap in seconds for the mlx encoder backend (default 120). Encode peak Metal memory scales ~90 MB per reference second; raise only on machines with enough unified memory.")
+    var maxReferenceSeconds: Double = 120
 
     // MARK: - Model selection
 
@@ -155,9 +158,6 @@ struct TTSCLI: AsyncParsableCommand {
 
     @Option(name: .long, help: "CodeDecoder (talker) backend: coreml (default) | mlx — MLX talker with batched ICL prefill and no KV cap; macOS 14+, requires the Base-family mlx-community checkpoint in the local HF cache")
     var codeDecoderBackend: String = "coreml"
-
-    @Option(name: .long, help: "Qwen3-TTS MLX checkpoint snapshot directory for the talker (default: the cached HF snapshot of the Base-family mlx-community repo)")
-    var mlxModelDir: String?
 
     @Option(name: .long, help: "MLX talker KV budget in positions (prompt + generated frames)")
     var mlxMaxSequenceLength: Int = 1024
@@ -361,7 +361,8 @@ struct TTSCLI: AsyncParsableCommand {
                     sampleRate: Double(MlxVoiceCloneEncoder.sampleRate)
                 )
                 let encoder = try MlxVoiceCloneEncoder(
-                    modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) }
+                    modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) },
+                    maxReferenceSeconds: maxReferenceSeconds
                 )
                 voiceClonePrompt = try encoder.encode(
                     waveform,
