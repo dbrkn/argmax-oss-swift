@@ -251,6 +251,8 @@ public struct GenerationOptions: Codable, Sendable {
     /// (e.g., `"Very happy"`). Prepended as a text-only user prompt before the main
     /// TTS segment. For Qwen3, this is only supported by the 1.7B model variant.
     public var instruction: String?
+    /// Voice-clone prompt derived from a reference clip; nil for custom-voice TTS.
+    public var voiceClone: VoiceClonePrompt?
 
     /// Force the legacy `[FloatType]` inference path even on macOS 15+ / iOS 18+.
     /// When `false` (default), the MLTensor path is taken on supported OS versions.
@@ -268,6 +270,7 @@ public struct GenerationOptions: Codable, Sendable {
         targetChunkSize: Int? = nil,
         minChunkSize: Int? = nil,
         instruction: String? = nil,
+        voiceClone: VoiceClonePrompt? = nil,
         forceLegacyEmbedPath: Bool = false
     ) {
         self.temperature = temperature
@@ -279,6 +282,7 @@ public struct GenerationOptions: Codable, Sendable {
         self.targetChunkSize = targetChunkSize
         self.minChunkSize = minChunkSize
         self.instruction = instruction
+        self.voiceClone = voiceClone
         self.forceLegacyEmbedPath = forceLegacyEmbedPath
     }
 }

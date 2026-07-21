@@ -1198,8 +1198,8 @@ final class ViewModel: @unchecked Sendable {
 extension TTSModelVariant {
     var sizeEstimate: String {
         switch self {
-            case .qwen3TTS_0_6b: return "~1 GB"
-            case .qwen3TTS_1_7b: return "~2.2 GB"
+            case .qwen3TTS_0_6b, .qwen3TTS_0_6b_base: return "~1 GB"
+            case .qwen3TTS_1_7b, .qwen3TTS_1_7b_base: return "~2.2 GB"
         }
     }
 }
