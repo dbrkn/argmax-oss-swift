@@ -76,10 +76,21 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Random seed for reproducible output")
     var seed: UInt64?
 
+    // MARK: - Voice clone options
+
+    @Option(name: .long, help: "Reference audio clip to clone the voice from (any readable audio format; enables voice cloning)")
+    var refAudio: String?
+
+    @Option(name: .long, help: "Transcript of the reference clip (required with --ref-audio unless --x-vector-only)")
+    var refText: String?
+
+    @Flag(name: .long, help: "Clone with the speaker x-vector only, skipping reference RVQ encoding (lower fidelity, no --ref-text needed)")
+    var xVectorOnly: Bool = false
+
     // MARK: - Model selection
 
-    @Option(name: .long, help: "Model preset (0.6b, 1.7b). Auto-configures version dir and variant defaults.")
-    var model: TTSModelVariant = .qwen3TTS_0_6b
+    @Option(name: .long, help: "Model preset (0.6b, 1.7b, 0.6b-base). Auto-configures version dir and variant defaults. Defaults to 0.6b, or 0.6b-base when --ref-audio is set.")
+    var model: TTSModelVariant?
 
     // MARK: - Advanced options (auto-configured by preset, can be overridden)
 
@@ -109,6 +120,24 @@ struct TTSCLI: AsyncParsableCommand {
 
     @Option(name: .long, help: "SpeechDecoder variant (overrides --model preset)")
     var speechDecoderVariant: String?
+
+    @Option(name: .long, help: "CodeEmbedder variant (overrides --model preset)")
+    var codeEmbedderVariant: String?
+
+    @Option(name: .long, help: "MultiCodeEmbedder variant (overrides --model preset)")
+    var multiCodeEmbedderVariant: String?
+
+    @Option(name: .long, help: "TextProjector variant (overrides --model preset)")
+    var textProjectorVariant: String?
+
+    @Option(name: .long, help: "SpeakerEncoder variant for voice cloning (e.g. W16A16-15s for longer references)")
+    var speakerEncoderVariant: String?
+
+    @Option(name: .long, help: "SpeechEncoder variant for voice cloning (e.g. W16A16-15s for longer references)")
+    var speechEncoderVariant: String?
+
+    @Option(name: .long, help: "SpeechEncoderRVQ variant for voice cloning (must match --speech-encoder-variant window)")
+    var speechEncoderRVQVariant: String?
 
     @Option(name: .long, help: "SpeechDecoder mode: latencyOptimized (default, lowest time-to-first-audio, 1 frame/call) or throughputOptimized (higher throughput, ~4x larger pre-buffer, 4 frames/call)")
     var speechDecoderMode: Qwen3SpeechDecoderMode = .latencyOptimized
@@ -149,6 +178,22 @@ struct TTSCLI: AsyncParsableCommand {
             throw ValidationError("Input text is empty")
         }
 
+        // Validate voice-clone flag combinations.
+        if refAudio == nil {
+            if refText != nil {
+                throw ValidationError("--ref-text requires --ref-audio")
+            }
+            if xVectorOnly {
+                throw ValidationError("--x-vector-only requires --ref-audio")
+            }
+        } else if !xVectorOnly, refText == nil {
+            throw ValidationError("--ref-text is required with --ref-audio (unless --x-vector-only is set)")
+        }
+
+        // Voice cloning needs the base-family checkpoints; default to 0.6b-base
+        // when --ref-audio is set and no explicit --model was given.
+        let model = self.model ?? (refAudio != nil ? .qwen3TTS_0_6b_base : .qwen3TTS_0_6b)
+
         // Resolve local models path if provided
         let resolvedModelFolder: URL? = modelsPath.map {
             URL(fileURLWithPath: FileManager.resolveAbsolutePath($0))
@@ -169,7 +214,13 @@ struct TTSCLI: AsyncParsableCommand {
             versionDir: versionDir,
             codeDecoderVariant: codeDecoderVariant,
             multiCodeDecoderVariant: multiCodeDecoderVariant,
+            codeEmbedderVariant: codeEmbedderVariant,
+            multiCodeEmbedderVariant: multiCodeEmbedderVariant,
+            textProjectorVariant: textProjectorVariant,
             speechDecoderVariant: speechDecoderVariant,
+            speakerEncoderVariant: speakerEncoderVariant,
+            speechEncoderVariant: speechEncoderVariant,
+            speechEncoderRVQVariant: speechEncoderRVQVariant,
             speechDecoderMode: speechDecoderMode,
             computeOptions: ComputeOptions(
                 embedderComputeUnits: embedderComputeUnits.asMLComputeUnits,
@@ -188,7 +239,7 @@ struct TTSCLI: AsyncParsableCommand {
 
         // Warn if instruction is used with a model that doesn't support it
         var effectiveInstruction = instruction
-        if let instruction = effectiveInstruction, !instruction.isEmpty, model == .qwen3TTS_0_6b {
+        if let instruction = effectiveInstruction, !instruction.isEmpty, !model.supportsVoiceDirection {
             print("Warning: --instruction is only supported by the 1.7B model variant. Ignoring instruction for \(model.rawValue).")
             effectiveInstruction = nil
         }
@@ -202,6 +253,13 @@ struct TTSCLI: AsyncParsableCommand {
             print("  Speaker: \(speaker.rawValue)")
             print("  Language: \(language.rawValue)")
             print("  Model: \(model.rawValue)")
+            if let refAudio {
+                print("  Reference audio: \(refAudio)")
+                if let refText {
+                    print("  Reference text: \"\(refText.prefix(80))\(refText.count > 80 ? "..." : "")\"")
+                }
+                print("  Clone mode: \(xVectorOnly ? "x-vector only" : "ICL")")
+            }
             if let inst = effectiveInstruction {
                 print("  Instruction: \"\(inst)\"")
             }
@@ -231,6 +289,19 @@ struct TTSCLI: AsyncParsableCommand {
         config.seed = effectiveSeed
         let tts = try await TTSKit(config)
 
+        // Encode the reference clip once; the resulting prompt is reused for
+        // every text chunk of this generate call.
+        var voiceClonePrompt: VoiceClonePrompt?
+        if let refAudio {
+            let refURL = URL(fileURLWithPath: FileManager.resolveAbsolutePath(refAudio))
+            try await tts.loadVoiceCloneModels()
+            voiceClonePrompt = try await tts.cloneVoice(
+                referenceAudio: refURL,
+                referenceText: refText,
+                xVectorOnly: xVectorOnly
+            )
+        }
+
         let options = GenerationOptions(
             temperature: temperature,
             topK: topK,
@@ -239,7 +310,8 @@ struct TTSCLI: AsyncParsableCommand {
             concurrentWorkerCount: effectiveWorkerCount,
             targetChunkSize: targetChunkSize,
             minChunkSize: minChunkSize,
-            instruction: effectiveInstruction
+            instruction: effectiveInstruction,
+            voiceClone: voiceClonePrompt
         )
 
         let result: SpeechResult

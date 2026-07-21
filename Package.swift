@@ -110,6 +110,7 @@ let package = Package(
             dependencies: [
                 "TTSKit"
             ],
+            resources: [.copy("Resources")],
             swiftSettings: swiftSettings()
         ),
         .testTarget(

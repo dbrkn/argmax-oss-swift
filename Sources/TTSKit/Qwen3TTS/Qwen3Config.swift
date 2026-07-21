@@ -24,18 +24,20 @@ public enum TTSModelFamily: String, Sendable {
 @frozen
 public enum TTSModelVariant: String, CustomStringConvertible, CaseIterable, Sendable {
     case qwen3TTS_0_6b = "0.6b"
+    case qwen3TTS_0_6b_base = "0.6b-base"
     case qwen3TTS_1_7b = "1.7b"
 
     /// The model architecture family this variant belongs to.
     public var family: TTSModelFamily {
         switch self {
-            case .qwen3TTS_0_6b, .qwen3TTS_1_7b: return .qwen3
+            case .qwen3TTS_0_6b, .qwen3TTS_0_6b_base, .qwen3TTS_1_7b: return .qwen3
         }
     }
 
     public var description: String {
         switch self {
             case .qwen3TTS_0_6b: return "Qwen3-TTS-0.6B"
+            case .qwen3TTS_0_6b_base: return "Qwen3-TTS-0.6B-Base"
             case .qwen3TTS_1_7b: return "Qwen3-TTS-1.7B"
         }
     }
@@ -44,6 +46,7 @@ public enum TTSModelVariant: String, CustomStringConvertible, CaseIterable, Send
     public var displayName: String {
         switch self {
             case .qwen3TTS_0_6b: return "Qwen3 TTS 0.6B"
+            case .qwen3TTS_0_6b_base: return "Qwen3 TTS 0.6B Base"
             case .qwen3TTS_1_7b: return "Qwen3 TTS 1.7B"
         }
     }
@@ -52,7 +55,7 @@ public enum TTSModelVariant: String, CustomStringConvertible, CaseIterable, Send
     /// Only the 1.7B variant has the capacity to follow style instructions.
     public var supportsVoiceDirection: Bool {
         switch self {
-            case .qwen3TTS_0_6b: return false
+            case .qwen3TTS_0_6b, .qwen3TTS_0_6b_base: return false
             case .qwen3TTS_1_7b: return true
         }
     }
@@ -66,7 +69,7 @@ public enum TTSModelVariant: String, CustomStringConvertible, CaseIterable, Send
         return true
         #else
         switch self {
-            case .qwen3TTS_0_6b: return true
+            case .qwen3TTS_0_6b, .qwen3TTS_0_6b_base: return true
             case .qwen3TTS_1_7b: return false
         }
         #endif
@@ -80,6 +83,7 @@ public enum TTSModelVariant: String, CustomStringConvertible, CaseIterable, Send
     public var versionDir: String {
         switch self {
             case .qwen3TTS_0_6b: return "12hz-0.6b-customvoice"
+            case .qwen3TTS_0_6b_base: return "12hz-0.6b-base"
             case .qwen3TTS_1_7b: return "12hz-1.7b-customvoice"
         }
     }
@@ -96,6 +100,12 @@ public enum TTSModelVariant: String, CustomStringConvertible, CaseIterable, Send
     public var textProjectorVariant: String { Qwen3VariantDefaults.textProjector }
     /// Recommended speech decoder variant for this model size.
     public var speechDecoderVariant: String { Qwen3VariantDefaults.speechDecoder }
+    /// Speaker encoder variant (voice clone; same across model sizes).
+    public var speakerEncoderVariant: String { Qwen3VariantDefaults.voiceCloneEncoder }
+    /// Speech encoder variant (voice clone; same across model sizes).
+    public var speechEncoderVariant: String { Qwen3VariantDefaults.voiceCloneEncoder }
+    /// Speech encoder RVQ variant (voice clone; same across model sizes).
+    public var speechEncoderRVQVariant: String { Qwen3VariantDefaults.voiceCloneEncoder }
     /// HuggingFace repo used to load the tokenizer for this model size.
     public var tokenizerRepo: String { Qwen3TTSConstants.defaultTokenizerRepo }
 }
@@ -110,6 +120,9 @@ public enum Qwen3VariantDefaults {
     public static let multiCodeEmbedder = "W16A16"
     public static let textProjector = "W8A16"
     public static let speechDecoder = "W8A16-multifunction"
+    /// Shared by the three voice-clone encoders (SpeakerEncoder, SpeechEncoder,
+    /// SpeechEncoderRVQ): W16A16 weights with a fixed ~10s reference window.
+    public static let voiceCloneEncoder = "W16A16-10s"
 }
 
 // MARK: - TTSKit Configuration
@@ -189,6 +202,13 @@ open class TTSKitConfig {
     public var multiCodeEmbedderVariant: String
     public var textProjectorVariant: String
     public var speechDecoderVariant: String
+
+    /// Per-component quantization variant for the voice-clone encoders
+    /// (resolved from `model` by default). Only consulted by
+    /// `loadVoiceCloneModels()` — never for plain custom-voice TTS.
+    public var speakerEncoderVariant: String
+    public var speechEncoderVariant: String
+    public var speechEncoderRVQVariant: String
 
     /// Which multifunction SpeechDecoder function to load. `.latencyOptimized`
     /// (default) decodes one frame per call; `.throughputOptimized` decodes four.
@@ -278,6 +298,9 @@ open class TTSKitConfig {
         multiCodeEmbedderVariant: String? = nil,
         textProjectorVariant: String? = nil,
         speechDecoderVariant: String? = nil,
+        speakerEncoderVariant: String? = nil,
+        speechEncoderVariant: String? = nil,
+        speechEncoderRVQVariant: String? = nil,
         speechDecoderMode: Qwen3SpeechDecoderMode = .latencyOptimized,
         computeOptions: ComputeOptions = ComputeOptions(),
         verbose: Bool = true,
@@ -304,6 +327,9 @@ open class TTSKitConfig {
         self.multiCodeEmbedderVariant = multiCodeEmbedderVariant ?? model.multiCodeEmbedderVariant
         self.textProjectorVariant = textProjectorVariant ?? model.textProjectorVariant
         self.speechDecoderVariant = speechDecoderVariant ?? model.speechDecoderVariant
+        self.speakerEncoderVariant = speakerEncoderVariant ?? model.speakerEncoderVariant
+        self.speechEncoderVariant = speechEncoderVariant ?? model.speechEncoderVariant
+        self.speechEncoderRVQVariant = speechEncoderRVQVariant ?? model.speechEncoderRVQVariant
         self.speechDecoderMode = speechDecoderMode
         self.computeOptions = computeOptions
         self.verbose = verbose
@@ -344,6 +370,13 @@ open class TTSKitConfig {
     public static let componentNames = [
         "text_projector", "code_embedder", "multi_code_embedder",
         "code_decoder", "multi_code_decoder", "speech_decoder"
+    ]
+
+    /// Voice-clone encoder components. Deliberately kept out of `componentNames`:
+    /// they are loaded (and downloaded) only when voice cloning is requested, via
+    /// `TTSKit.loadVoiceCloneModels()`.
+    public static let voiceCloneComponentNames = [
+        "speaker_encoder", "speech_encoder", "speech_encoder_rvq"
     ]
 
     /// Version-specific directory for each component inside `modelFolder`.
