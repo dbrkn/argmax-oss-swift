@@ -393,12 +393,26 @@ open class TTSKit: @unchecked Sendable {
             let resolvedRepo = modelRepo ?? config.modelRepo
             let resolvedToken = modelToken ?? config.modelToken
 
+            // Carry the full component configuration into the download so the
+            // fetched files match what `loadModels()` will look for. Rebuilding
+            // from `model:` alone would silently download the preset-default
+            // versionDir/variants while load resolves the configured ones.
             let downloadConfig = TTSKitConfig(
                 model: resolvedModel,
                 downloadBase: downloadBase ?? config.downloadBase,
                 modelRepo: resolvedRepo,
                 modelToken: resolvedToken,
                 modelEndpoint: endpoint,
+                versionDir: config.versionDir,
+                codeDecoderVariant: config.codeDecoderVariant,
+                multiCodeDecoderVariant: config.multiCodeDecoderVariant,
+                codeEmbedderVariant: config.codeEmbedderVariant,
+                multiCodeEmbedderVariant: config.multiCodeEmbedderVariant,
+                textProjectorVariant: config.textProjectorVariant,
+                speechDecoderVariant: config.speechDecoderVariant,
+                speakerEncoderVariant: config.speakerEncoderVariant,
+                speechEncoderVariant: config.speechEncoderVariant,
+                speechEncoderRVQVariant: config.speechEncoderRVQVariant,
                 downloadRevision: config.downloadRevision,
                 downloadAdditionalPatterns: config.downloadAdditionalPatterns,
                 useBackgroundDownloadSession: config.useBackgroundDownloadSession

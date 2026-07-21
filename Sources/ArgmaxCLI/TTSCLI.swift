@@ -89,7 +89,7 @@ struct TTSCLI: AsyncParsableCommand {
 
     // MARK: - Model selection
 
-    @Option(name: .long, help: "Model preset (0.6b, 1.7b, 0.6b-base). Auto-configures version dir and variant defaults. Defaults to 0.6b, or 0.6b-base when --ref-audio is set.")
+    @Option(name: .long, help: "Model preset (0.6b, 0.6b-base, 1.7b, 1.7b-base). Auto-configures version dir and variant defaults; the -base presets carry the voice-clone assets. Defaults to 0.6b, or 0.6b-base when --ref-audio is set.")
     var model: TTSModelVariant?
 
     // MARK: - Advanced options (auto-configured by preset, can be overridden)
@@ -139,8 +139,8 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "SpeechEncoderRVQ variant for voice cloning (must match --speech-encoder-variant window)")
     var speechEncoderRVQVariant: String?
 
-    @Option(name: .long, help: "SpeechDecoder mode: latencyOptimized (default, lowest time-to-first-audio, 1 frame/call) or throughputOptimized (higher throughput, ~4x larger pre-buffer, 4 frames/call)")
-    var speechDecoderMode: Qwen3SpeechDecoderMode = .latencyOptimized
+    @Option(name: .long, help: "SpeechDecoder mode: latencyOptimized (lowest time-to-first-audio, 1 frame/call), throughputOptimized (higher throughput, ~4x larger pre-buffer, 4 frames/call), or singleFunction (single-function assets, e.g. the base-family speech decoders). Defaults to latencyOptimized, or singleFunction for -base model presets.")
+    var speechDecoderMode: Qwen3SpeechDecoderMode?
 
     // MARK: - Compute unit options
 
@@ -221,7 +221,7 @@ struct TTSCLI: AsyncParsableCommand {
             speakerEncoderVariant: speakerEncoderVariant,
             speechEncoderVariant: speechEncoderVariant,
             speechEncoderRVQVariant: speechEncoderRVQVariant,
-            speechDecoderMode: speechDecoderMode,
+            speechDecoderMode: speechDecoderMode ?? (model.isBaseVariant ? .singleFunction : .latencyOptimized),
             computeOptions: ComputeOptions(
                 embedderComputeUnits: embedderComputeUnits.asMLComputeUnits,
                 codeDecoderComputeUnits: codeDecoderComputeUnits.asMLComputeUnits,
@@ -230,6 +230,13 @@ struct TTSCLI: AsyncParsableCommand {
             ),
             verbose: verbose
         )
+
+        // Voice cloning needs the three encoder assets, which sit outside the
+        // default component download patterns (they are loaded lazily by
+        // `loadVoiceCloneModels()`); include them in the model download.
+        if refAudio != nil {
+            config.downloadAdditionalPatterns += config.voiceCloneDownloadPatterns
+        }
 
         // Default: --play uses sequential (1), file output uses unlimited (0).
         let effectiveWorkerCount = concurrentWorkerCount ?? (play ? 1 : 0)
