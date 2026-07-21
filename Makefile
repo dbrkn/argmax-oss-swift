@@ -172,12 +172,13 @@ build-cli:
 	@swift build -c release --product argmax-cli
 
 
-# Only needed to RUN `argmax-cli tts --code-decoder-backend mlx`: command-line
-# SwiftPM cannot compile mlx-swift's Metal shaders (the binary fails at runtime
-# with "Failed to load the default metallib"), while xcodebuild compiles them
-# into the mlx-swift_Cmlx.bundle. Build the bundle once via xcodebuild and
-# graft it next to the SwiftPM release binary. The default coreml backend does
-# not need this.
+# Only needed to RUN `argmax-cli tts` with an mlx backend
+# (--code-decoder-backend mlx or --voice-clone-encoder-backend mlx):
+# command-line SwiftPM cannot compile mlx-swift's Metal shaders (the binary
+# fails at runtime with "Failed to load the default metallib"), while
+# xcodebuild compiles them into the mlx-swift_Cmlx.bundle. Build the bundle
+# once via xcodebuild and graft it next to the SwiftPM release binary. The
+# default coreml backends do not need this.
 graft-mlx-metallib:
 	@echo "Building mlx-swift Metal shader bundle via xcodebuild..."
 	@xcodebuild build -scheme argmax-cli -destination platform=macOS -derivedDataPath .build/xcode -quiet

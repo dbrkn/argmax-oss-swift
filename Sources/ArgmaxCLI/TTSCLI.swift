@@ -90,6 +90,12 @@ struct TTSCLI: AsyncParsableCommand {
     @Flag(name: .long, help: "Clone with the speaker x-vector only, skipping reference RVQ encoding (lower fidelity, no --ref-text needed)")
     var xVectorOnly: Bool = false
 
+    @Option(name: .long, help: "Voice-clone reference encoder backend: coreml (default, fixed 10/15s reference windows, ANE) | mlx (variable-length references, GPU, macOS 14+; requires the Base-family mlx-community checkpoint in the local HF cache)")
+    var voiceCloneEncoderBackend: String = "coreml"
+
+    @Option(name: .long, help: "Qwen3-TTS MLX checkpoint snapshot directory for the mlx encoder backend (default: the cached HF snapshot of the Base-family mlx-community repo)")
+    var mlxModelDir: String?
+
     // MARK: - Model selection
 
     @Option(name: .long, help: "Model preset (0.6b, 0.6b-base, 1.7b, 1.7b-base). Auto-configures version dir and variant defaults; the -base presets carry the voice-clone assets. Defaults to 0.6b, or 0.6b-base when --ref-audio is set.")
@@ -203,6 +209,9 @@ struct TTSCLI: AsyncParsableCommand {
         } else if !xVectorOnly, refText == nil {
             throw ValidationError("--ref-text is required with --ref-audio (unless --x-vector-only is set)")
         }
+        guard voiceCloneEncoderBackend == "coreml" || voiceCloneEncoderBackend == "mlx" else {
+            throw ValidationError("Unknown --voice-clone-encoder-backend '\(voiceCloneEncoderBackend)' (expected coreml or mlx)")
+        }
 
         // Voice cloning needs the base-family checkpoints; default to 0.6b-base
         // when --ref-audio is set and no explicit --model was given.
@@ -309,6 +318,7 @@ struct TTSCLI: AsyncParsableCommand {
                     print("  Reference text: \"\(refText.prefix(80))\(refText.count > 80 ? "..." : "")\"")
                 }
                 print("  Clone mode: \(xVectorOnly ? "x-vector only" : "ICL")")
+                print("  Reference encoder: \(voiceCloneEncoderBackend)")
             }
             if let inst = effectiveInstruction {
                 print("  Instruction: \"\(inst)\"")
@@ -344,12 +354,31 @@ struct TTSCLI: AsyncParsableCommand {
         var voiceClonePrompt: VoiceClonePrompt?
         if let refAudio {
             let refURL = URL(fileURLWithPath: FileManager.resolveAbsolutePath(refAudio))
-            try await tts.loadVoiceCloneModels()
-            voiceClonePrompt = try await tts.cloneVoice(
-                referenceAudio: refURL,
-                referenceText: refText,
-                xVectorOnly: xVectorOnly
-            )
+            if voiceCloneEncoderBackend == "mlx" {
+                #if canImport(TTSKitMLX)
+                let waveform = try AudioInput.loadMono(
+                    url: refURL,
+                    sampleRate: Double(MlxVoiceCloneEncoder.sampleRate)
+                )
+                let encoder = try MlxVoiceCloneEncoder(
+                    modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) }
+                )
+                voiceClonePrompt = try encoder.encode(
+                    waveform,
+                    includeReferenceCodes: !xVectorOnly,
+                    referenceText: refText
+                )
+                #else
+                throw ValidationError("--voice-clone-encoder-backend mlx is not available on this platform (requires macOS 14+ with MLX support)")
+                #endif
+            } else {
+                try await tts.loadVoiceCloneModels()
+                voiceClonePrompt = try await tts.cloneVoice(
+                    referenceAudio: refURL,
+                    referenceText: refText,
+                    xVectorOnly: xVectorOnly
+                )
+            }
         }
 
         let options = GenerationOptions(
