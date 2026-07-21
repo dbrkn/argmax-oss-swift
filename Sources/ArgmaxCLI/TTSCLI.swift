@@ -96,6 +96,9 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Qwen3-TTS MLX checkpoint snapshot directory for the mlx encoder backend (default: the cached HF snapshot of the Base-family mlx-community repo)")
     var mlxModelDir: String?
 
+    @Option(name: .long, help: "Reference-duration cap in seconds for the mlx encoder backend (default 120). Encode peak Metal memory scales ~90 MB per reference second; raise only on machines with enough unified memory.")
+    var maxReferenceSeconds: Double = 120
+
     // MARK: - Model selection
 
     @Option(name: .long, help: "Model preset (0.6b, 0.6b-base, 1.7b, 1.7b-base). Auto-configures version dir and variant defaults; the -base presets carry the voice-clone assets. Defaults to 0.6b, or 0.6b-base when --ref-audio is set.")
@@ -321,7 +324,8 @@ struct TTSCLI: AsyncParsableCommand {
                     sampleRate: Double(MlxVoiceCloneEncoder.sampleRate)
                 )
                 let encoder = try MlxVoiceCloneEncoder(
-                    modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) }
+                    modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) },
+                    maxReferenceSeconds: maxReferenceSeconds
                 )
                 voiceClonePrompt = try encoder.encode(
                     waveform,
