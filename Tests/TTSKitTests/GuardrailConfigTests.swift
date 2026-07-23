@@ -2,7 +2,7 @@
 //  Copyright © 2026 Argmax, Inc. All rights reserved.
 
 import XCTest
-@testable import TTSKitMLX
+@testable import TTSKit
 
 /// The detector is model-agnostic; the anchor head is not. These lock the
 /// per-model anchor presets (0.6B → L6H0, 1.7B → L3H0) and the load-time

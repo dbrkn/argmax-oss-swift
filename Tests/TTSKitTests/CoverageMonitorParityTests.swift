@@ -2,7 +2,7 @@
 //  Copyright © 2026 Argmax, Inc. All rights reserved.
 
 import XCTest
-@testable import TTSKitMLX
+@testable import TTSKit
 
 /// Locks the Swift ``CoverageMonitor`` to RD-655 `coverage_monitor.py`.
 ///
