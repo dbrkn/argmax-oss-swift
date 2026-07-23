@@ -204,7 +204,8 @@ final class TalkerAttention {
     }
 
     func callAsFunction(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, mask: MLXArray?, cache: TalkerKVCacheLayer
+        _ x: MLXArray, cos: MLXArray, sin: MLXArray, mask: MLXArray?, cache: TalkerKVCacheLayer,
+        layerIndex: Int = -1, probe: AnchorProbe? = nil
     ) -> MLXArray {
         let (batch, seqLen) = (x.dim(0), x.dim(1))
 
@@ -223,6 +224,13 @@ final class TalkerAttention {
         k = Self.applyRotary(k, cos: cos, sin: sin)
 
         let (cachedK, cachedV) = cache.update(keys: k, values: v)
+
+        // Observe-only text-anchor readout on the anchor layer during decode.
+        // A separate score computation; the SDPA output below is unchanged.
+        if let probe, seqLen == 1, layerIndex == probe.anchorLayer {
+            probe.observe(q: q, cachedK: cachedK, scale: pow(Float(headDim), -0.5),
+                          grp: numHeads / numKVHeads)
+        }
 
         let out = MLXFast.scaledDotProductAttention(
             queries: q, keys: cachedK, values: cachedV,
@@ -256,10 +264,11 @@ final class TalkerLayer {
     }
 
     func callAsFunction(
-        _ x: MLXArray, cos: MLXArray, sin: MLXArray, mask: MLXArray?, cache: TalkerKVCacheLayer
+        _ x: MLXArray, cos: MLXArray, sin: MLXArray, mask: MLXArray?, cache: TalkerKVCacheLayer,
+        layerIndex: Int = -1, probe: AnchorProbe? = nil
     ) -> MLXArray {
         var h = MLXFast.rmsNorm(x, weight: inputNormWeight, eps: rmsNormEps)
-        h = x + attention(h, cos: cos, sin: sin, mask: mask, cache: cache)
+        h = x + attention(h, cos: cos, sin: sin, mask: mask, cache: cache, layerIndex: layerIndex, probe: probe)
         var m = MLXFast.rmsNorm(h, weight: postAttentionNormWeight, eps: rmsNormEps)
         m = downProj(silu(gateProj(m)) * upProj(m))
         return h + m
@@ -350,7 +359,7 @@ final class Talker {
     /// consumes intermediate-position outputs (the codec head over all `L`
     /// prefill positions would be wasted work).
     func callAsFunction(
-        _ inputsEmbeds: MLXArray, cache: [TalkerKVCacheLayer]
+        _ inputsEmbeds: MLXArray, cache: [TalkerKVCacheLayer], probe: AnchorProbe? = nil
     ) -> (logits: MLXArray, hidden: MLXArray) {
         let seqLen = inputsEmbeds.dim(1)
         let offset = cache.first?.offset ?? 0
@@ -377,8 +386,8 @@ final class Talker {
         }
 
         var x = inputsEmbeds
-        for (layer, layerCache) in zip(layers, cache) {
-            x = layer(x, cos: cos, sin: sin, mask: mask, cache: layerCache)
+        for (i, (layer, layerCache)) in zip(layers, cache).enumerated() {
+            x = layer(x, cos: cos, sin: sin, mask: mask, cache: layerCache, layerIndex: i, probe: probe)
         }
         let hidden = MLXFast.rmsNorm(
             x[0..., (seqLen - 1)..., 0...], weight: normWeight, eps: config.rmsNormEps

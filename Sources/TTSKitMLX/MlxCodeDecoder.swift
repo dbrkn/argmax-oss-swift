@@ -31,7 +31,7 @@ import TTSKit
 /// is per-instance state — one instance supports one generation at a time
 /// (matching the Python `MlxCodeDecoder` adapter). Voice-clone generation is
 /// single-chunk, so this does not constrain the intended use.
-public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, @unchecked Sendable {
+public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailObservable, @unchecked Sendable {
     /// Always `nil`: the talker runs on MLX, not CoreML.
     public private(set) var model: MLModel?
 
@@ -50,6 +50,11 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, @unchecked
     private let modelDirectory: URL
     private var talker: Talker?
     private var internalCache: [TalkerKVCacheLayer] = []
+
+    /// Per-generation text-anchor observable (RD-655 guardrails). `nil` unless
+    /// the orchestrator armed observation via ``GuardrailObservable``. Passed
+    /// into every talker forward; observe-only, no effect on the audio.
+    public var anchorProbe: AnchorProbe?
 
     /// Load the talker from a Qwen3-TTS MLX checkpoint snapshot directory
     /// (see ``ModelDirectory``). Pass `nil` to resolve the default repo's
@@ -152,7 +157,7 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, @unchecked
         // embeddings of the CoreML pipeline and the Python MLX adapter.
         let x = MLXArray(flat, [1, embeds.count, dim]).asType(.float16)
 
-        let (logitsArray, hiddenArray) = talker(x, cache: internalCache)
+        let (logitsArray, hiddenArray) = talker(x, cache: internalCache, probe: anchorProbe)
         eval(logitsArray, hiddenArray)
 
         // Mirror the consumed positions into the external cache so the
@@ -165,6 +170,19 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, @unchecked
         let hidden = hiddenArray.asType(.float32).asArray(Float.self).map { FloatType($0) }
         return (logits, hidden)
     }
+
+    // MARK: - Guardrail observation (RD-655, Stage 1)
+
+    public func beginGuardrailObservation(
+        anchorLayer: Int, anchorHead: Int, textStart: Int, textEnd: Int, recordTrajectory: Bool
+    ) {
+        anchorProbe = AnchorProbe(anchorLayer: anchorLayer, anchorHead: anchorHead,
+                                  textStart: textStart, textEnd: textEnd, recordTrajectory: recordTrajectory)
+    }
+    public var lastAnchorFraction: Float? { anchorProbe?.lastF }
+    public func guardrailTrajectory() -> [Float] { anchorProbe?.trajectory ?? [] }
+    public func truncateGuardrailTrajectory(to n: Int) { anchorProbe?.truncateTrajectory(to: n) }
+    public func endGuardrailObservation() { anchorProbe = nil }
 
     /// Re-synchronize the internal MLX cache with the external cache position.
     private func syncInternalCache(to position: Int) throws {
