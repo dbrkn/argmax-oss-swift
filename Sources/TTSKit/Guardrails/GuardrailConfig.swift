@@ -21,7 +21,7 @@ import Foundation
 /// picks the preset; an explicit override always wins. The anchor coordinate is
 /// validated against the loaded model's dims at install (loud error if out of
 /// range), because a wrong head silently produces a garbage signal.
-public struct GuardrailConfig: Sendable, Equatable {
+public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// Master switch. Off by default — guardrails ship dark until validated on
     /// our own eval set, then the default flips.
     public var enabled: Bool = false

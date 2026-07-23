@@ -104,6 +104,9 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Model preset (0.6b, 0.6b-base, 1.7b, 1.7b-base). Auto-configures version dir and variant defaults; the -base presets carry the voice-clone assets. Defaults to 0.6b, or 0.6b-base when --ref-audio is set.")
     var model: TTSModelVariant?
 
+    @Option(name: .long, help: "Decoding guardrails (RD-655, MLX talker only): off (default) | observe (detect + log, audio unchanged) | full (also roll back skips/hallucinations). Anchor head auto-resolves by model size.")
+    var guardrails: String = "off"
+
     // MARK: - Advanced options (auto-configured by preset, can be overridden)
 
     @Option(name: .long, help: "Local model directory (skips download if provided)")
@@ -382,6 +385,17 @@ struct TTSCLI: AsyncParsableCommand {
             }
         }
 
+        // Decoding guardrails (RD-655). Observe-only detects + logs (audio
+        // unchanged); full also rolls back. Anchor head auto-resolves by model.
+        var guardrailConfig: GuardrailConfig?
+        if guardrails != "off" {
+            var g = GuardrailConfig.resolve(versionDir: versionDir ?? model.versionDir)
+            g.enabled = true
+            g.observeOnly = (guardrails == "observe")
+            g.recordTrajectory = true
+            guardrailConfig = g
+        }
+
         let options = GenerationOptions(
             temperature: temperature,
             topK: topK,
@@ -391,7 +405,8 @@ struct TTSCLI: AsyncParsableCommand {
             targetChunkSize: targetChunkSize,
             minChunkSize: minChunkSize,
             instruction: effectiveInstruction,
-            voiceClone: voiceClonePrompt
+            voiceClone: voiceClonePrompt,
+            guardrails: guardrailConfig
         )
 
         let result: SpeechResult

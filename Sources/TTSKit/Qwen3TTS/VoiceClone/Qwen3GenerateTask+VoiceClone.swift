@@ -30,7 +30,7 @@ extension Qwen3GenerateTask {
         instruction: String?,
         textTokenIds: [Int32],
         embedDim: Int
-    ) async throws -> [[FloatType]] {
+    ) async throws -> (embeds: [[FloatType]], mainTextRange: Range<Int>) {
         guard let referenceCodes = prompt.referenceCodes, prompt.referenceCodeFrames > 0 else {
             throw TTSError.invalidConfiguration("ICL voice clone requires reference RVQ codes")
         }
@@ -96,6 +96,13 @@ extension Qwen3GenerateTask {
         }
         try await iclTextEmbeds.append(textProjector.project(tokenId: Qwen3TTSConstants.textEOS))
 
+        // Absolute KV span of the SYNTHESIS text (main text) within the prefix —
+        // the coverage region the guardrail anchor tracks. It sits after the
+        // control block + the reference transcript, before the trailing EOS.
+        let refTextCount = iclTokenIds.count - textTokenIds.count
+        let mainTextStart = textTrack.count + refTextCount
+        let mainTextEnd = mainTextStart + textTokenIds.count
+
         textTrack.append(contentsOf: iclTextEmbeds)
         codecTrack.append(contentsOf: Array(repeating: codecPadEmbed, count: iclTextEmbeds.count))
 
@@ -134,7 +141,8 @@ extension Qwen3GenerateTask {
             )
         }
 
-        return zip(textTrack, codecTrack).map { EmbedUtilities.addEmbeddings($0.0, $0.1) }
+        let embeds = zip(textTrack, codecTrack).map { EmbedUtilities.addEmbeddings($0.0, $0.1) }
+        return (embeds, mainTextStart..<mainTextEnd)
     }
 
     /// Embedding of one 16-code RVQ frame: `codeEmbedder(code₀) + Σᵢ

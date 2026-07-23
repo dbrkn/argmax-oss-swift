@@ -295,7 +295,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             let embedDim = codeDecoder.embedSize
             let combinedEmbeds: [[FloatType]]
             if let clone = options.voiceClone, clone.referenceCodes != nil {
-                combinedEmbeds = try await buildVoiceCloneICLEmbeddings(
+                let icl = try await buildVoiceCloneICLEmbeddings(
                     prompt: clone,
                     referenceText: clone.referenceText ?? "",
                     lang: lang,
@@ -303,6 +303,18 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                     textTokenIds: tokenizeResult.textTokenIds,
                     embedDim: embedDim
                 )
+                combinedEmbeds = icl.embeds
+                // Arm the guardrail anchor probe over the synthesis-text KV span
+                // (observe-only; no effect on audio unless the executor is later
+                // enabled). No-op for decoders that aren't GuardrailObservable.
+                if let g = options.guardrails, g.enabled, let obs = codeDecoder as? GuardrailObservable {
+                    obs.beginGuardrailObservation(
+                        anchorLayer: g.anchorLayer, anchorHead: g.anchorHead,
+                        textStart: icl.mainTextRange.lowerBound, textEnd: icl.mainTextRange.upperBound,
+                        recordTrajectory: g.recordTrajectory)
+                    Logging.info("Guardrails armed: anchor L\(g.anchorLayer)H\(g.anchorHead), "
+                        + "text KV span [\(icl.mainTextRange.lowerBound),\(icl.mainTextRange.upperBound))")
+                }
             } else {
                 combinedEmbeds = try await buildCombinedEmbeddings(
                     speaker: speaker, lang: lang,
@@ -422,6 +434,26 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         // unstructured Task that does not inherit this loop's cancellation.
         defer { writer.cancelPendingDecode() }
 
+        // Guardrail detection (RD-655, Stage 1 observe-only). Active only when
+        // enabled AND the decoder exposes the anchor observable (MLX talker).
+        let gConfig = options.guardrails
+        let guardObs: GuardrailObservable? =
+            (gConfig?.enabled == true) ? (codeDecoder as? GuardrailObservable) : nil
+        var guardMonitor: CoverageMonitor? = guardObs == nil ? nil
+            : CoverageMonitor(ntok: max(1, tokenizeResult.textTokenIds.count), config: gConfig!.monitor)
+        var guardStats = GuardrailStats()
+        if let g = gConfig, guardObs != nil {
+            guardStats.active = true
+            guardStats.observeOnly = g.observeOnly
+            guardStats.anchor = [g.anchorLayer, g.anchorHead]
+        }
+        // Step the monitor with the anchor fraction the just-completed decode
+        // recorded. Observe-only: count fires, never roll back (Stage 1).
+        func guardStep() {
+            guard let obs = guardObs, let f = obs.lastAnchorFraction else { return }
+            if let fire = guardMonitor?.step(f) { guardStats.record(fire) }
+        }
+
         // TODO: Remove forking logic with package with min os version upgrade
         if #available(macOS 15.0, iOS 18.0, watchOS 11.0, visionOS 2.0, *), !options.forceLegacyEmbedPath {
             let textPadEmbedTensor: MLTensor = try await textProjector.project(tokenId: Qwen3TTSConstants.textPAD)
@@ -487,6 +519,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 lastCdOutput = try await codeDecoder.decode(inputEmbeds: combinedTensor, cache: cdCache, state: cdState)
                 timings.decodingPredictions += CFAbsoluteTimeGetCurrent() - decodingStart - lastCdOutput.internalCacheUpdateTime
                 timings.kvCacheUpdate += lastCdOutput.internalCacheUpdateTime
+                guardStep()
 
                 let samplingStart = CFAbsoluteTimeGetCurrent()
                 code0 = await sampler.sampleCodec0(
@@ -579,6 +612,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 let decodingStart = CFAbsoluteTimeGetCurrent()
                 lastCdOutput = try await codeDecoder.decode(inputEmbeds: combinedArr, cache: cdCache, state: cdState)
                 timings.decodingPredictions += CFAbsoluteTimeGetCurrent() - decodingStart
+                guardStep()
 
                 let samplingStart = CFAbsoluteTimeGetCurrent()
                 code0 = await sampler.sampleCodec0(
@@ -628,6 +662,26 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             stopReason = "maxNewTokens limit (\(options.maxNewTokens))"
         }
         Logging.info("Loop stopped: \(stopReason) after \(stepIndex) steps")
+
+        // Guardrail finalization: log the run's fire stats and, for anchor
+        // validation, dump the f(t) trajectory when GUARDRAIL_TRAJECTORY_OUT is set.
+        if let obs = guardObs {
+            if gConfig?.recordTrajectory == true { guardStats.fTrajectory = obs.guardrailTrajectory() }
+            Logging.info(guardStats.summary)
+            if let out = ProcessInfo.processInfo.environment["GUARDRAIL_TRAJECTORY_OUT"] {
+                let traj = obs.guardrailTrajectory()
+                let fires = guardStats.events.map {
+                    "{\"type\":\"\($0.failure.rawValue)\",\"fire\":\($0.fireStep),\"rollback\":\($0.rollbackStep)}"
+                }.joined(separator: ",")
+                let fstr = traj.map { String($0) }.joined(separator: ",")
+                let json = "{\"anchor\":[\(gConfig!.anchorLayer),\(gConfig!.anchorHead)],"
+                    + "\"ntok\":\(tokenizeResult.textTokenIds.count),\"steps\":\(stepIndex),"
+                    + "\"fires\":[\(fires)],\"f\":[\(fstr)]}"
+                try? json.write(toFile: out, atomically: true, encoding: .utf8)
+                Logging.info("Guardrail trajectory (\(traj.count) steps, \(guardStats.events.count) fires) -> \(out)")
+            }
+            obs.endGuardrailObservation()
+        }
 
         timings.totalDecodingLoops = Double(stepIndex)
         return GenerationLoopResult(audio: writer.collectedAudio, steps: stepIndex, timings: timings)

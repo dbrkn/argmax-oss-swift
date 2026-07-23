@@ -18,7 +18,7 @@ import Foundation
 /// nSteps)`); no MLX dependency so it unit-tests without the model. The
 /// operating point and every branch mirror the Python; parity is locked by
 /// `CoverageMonitorParityTests`.
-public struct CoverageMonitorConfig: Sendable, Equatable {
+public struct CoverageMonitorConfig: Codable, Sendable, Equatable {
     public var tokPerBin: Int = 10
     public var commitFrac: Double = 0.3
     public var win: Int = 40

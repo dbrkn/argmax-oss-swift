@@ -260,6 +260,11 @@ public struct GenerationOptions: Codable, Sendable {
     // TODO: Remove forking logic with package with min os version upgrade
     public var forceLegacyEmbedPath: Bool
 
+    /// Decoding guardrails (RD-655). `nil` (default) = off. Enable to detect
+    /// (and optionally roll back) long-form skips/hallucinations on the MLX
+    /// talker; no-op on other decoders. See ``GuardrailConfig``.
+    public var guardrails: GuardrailConfig?
+
     public init(
         temperature: Float = GenerationOptions.defaultTemperature,
         topK: Int = GenerationOptions.defaultTopK,
@@ -271,7 +276,8 @@ public struct GenerationOptions: Codable, Sendable {
         minChunkSize: Int? = nil,
         instruction: String? = nil,
         voiceClone: VoiceClonePrompt? = nil,
-        forceLegacyEmbedPath: Bool = false
+        forceLegacyEmbedPath: Bool = false,
+        guardrails: GuardrailConfig? = nil
     ) {
         self.temperature = temperature
         self.topK = topK
@@ -284,6 +290,7 @@ public struct GenerationOptions: Codable, Sendable {
         self.instruction = instruction
         self.voiceClone = voiceClone
         self.forceLegacyEmbedPath = forceLegacyEmbedPath
+        self.guardrails = guardrails
     }
 }
 
