@@ -29,4 +29,15 @@ public protocol GuardrailObservable: AnyObject {
 
     /// Disarm and clear the probe at end of generation.
     func endGuardrailObservation()
+
+    /// Executor (Stage 2): rewind the decoder's internal KV state to
+    /// `decodeStep` decode steps after the prefill, so the next forward
+    /// re-decodes from there. O(1) trim (append-only cache). The orchestrator
+    /// separately trims its own external cache + code buffer + monitor.
+    func guardrailRollback(toDecodeStep decodeStep: Int)
+}
+
+extension GuardrailObservable {
+    // Default no-op so observe-only decoders need not implement it.
+    public func guardrailRollback(toDecodeStep decodeStep: Int) {}
 }

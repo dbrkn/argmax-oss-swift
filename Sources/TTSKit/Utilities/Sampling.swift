@@ -29,6 +29,14 @@ public protocol TokenSampling {
         temperature: Float,
         topK: Int
     ) async -> Int32
+
+    /// Reseed the RNG (guardrail rollback: a fresh draw for the re-decode).
+    /// Default no-op for samplers without a seedable RNG.
+    func reseed(_ seed: UInt64)
+}
+
+extension TokenSampling {
+    public func reseed(_ seed: UInt64) {}
 }
 
 // MARK: - Greedy / Top-k Sampler
@@ -49,6 +57,10 @@ public class GreedyTokenSampler: TokenSampling, @unchecked Sendable {
         } else {
             self.rng = SystemRandomNumberGenerator()
         }
+    }
+
+    public func reseed(_ seed: UInt64) {
+        self.rng = SeededRandomNumberGenerator(seed: seed)
     }
 
     public func sampleCodec0(
