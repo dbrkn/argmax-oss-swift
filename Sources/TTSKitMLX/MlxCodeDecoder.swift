@@ -181,6 +181,10 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailO
     }
     public var lastAnchorFraction: Float? { anchorProbe?.lastF }
     public func guardrailTrajectory() -> [Float] { anchorProbe?.trajectory ?? [] }
+    public func guardrailDiagnostics() -> (globalArgmax: [Int], textMass: [Float], textStart: Int, textEnd: Int) {
+        guard let p = anchorProbe else { return ([], [], -1, -1) }
+        return (p.globalArgmax, p.textMass, p.textStart, p.textEnd)
+    }
     public func truncateGuardrailTrajectory(to n: Int) { anchorProbe?.truncateTrajectory(to: n) }
     public func endGuardrailObservation() { anchorProbe = nil }
 

@@ -36,6 +36,13 @@ public final class AnchorProbe {
     public private(set) var lastF: Float?
     /// Full trajectory when recording is on (offline anchor validation).
     public private(set) var trajectory: [Float] = []
+    /// Diagnostics (recorded alongside `trajectory` when recording): per step the
+    /// GLOBAL argmax over the whole KV (absolute position) and the fraction of
+    /// attention mass inside the text span. A dip in `f` with low `textMass` /
+    /// a `globalArgmax` outside `[textStart,textEnd)` means the anchor is looking
+    /// elsewhere (control/reference tokens), i.e. the span/head needs correcting.
+    public private(set) var globalArgmax: [Int] = []
+    public private(set) var textMass: [Float] = []
     private let record: Bool
 
     public init(anchorLayer: Int, anchorHead: Int, textStart: Int, textEnd: Int, recordTrajectory: Bool = false) {
@@ -51,11 +58,16 @@ public final class AnchorProbe {
     public func reset() {
         lastF = nil
         trajectory.removeAll(keepingCapacity: true)
+        globalArgmax.removeAll(keepingCapacity: true)
+        textMass.removeAll(keepingCapacity: true)
     }
 
     /// Truncate the recorded trajectory to `n` steps (mirrors a monitor rollback).
     public func truncateTrajectory(to n: Int) {
-        if record, trajectory.count > n { trajectory.removeLast(trajectory.count - n) }
+        guard record else { return }
+        if trajectory.count > n { trajectory.removeLast(trajectory.count - n) }
+        if globalArgmax.count > n { globalArgmax.removeLast(globalArgmax.count - n) }
+        if textMass.count > n { textMass.removeLast(textMass.count - n) }
     }
 
     /// Compute and record `f(t)` from the anchor head's scores against the
@@ -79,7 +91,14 @@ public final class AnchorProbe {
         let am = textStart + argMax(seg).item(Int.self)     // absolute attended text position
         let f = Float(am - textStart) / Float(max(1, textEnd - textStart))
         lastF = f
-        if record { trajectory.append(f) }
+        if record {
+            trajectory.append(f)
+            // Diagnostics: where does the head actually look, and how much mass
+            // is inside the text span? (softmax over the full KV row.)
+            let probs = softmax(scores, axis: -1)
+            globalArgmax.append(argMax(scores).item(Int.self))
+            textMass.append(probs[textStart ..< end].sum().item(Float.self))
+        }
     }
 }
 

@@ -439,7 +439,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         let gConfig = options.guardrails
         let guardObs: GuardrailObservable? =
             (gConfig?.enabled == true) ? (codeDecoder as? GuardrailObservable) : nil
-        var guardMonitor: CoverageMonitor? = guardObs == nil ? nil
+        let guardMonitor: CoverageMonitor? = guardObs == nil ? nil
             : CoverageMonitor(ntok: max(1, tokenizeResult.textTokenIds.count), config: gConfig!.monitor)
         var guardStats = GuardrailStats()
         if let g = gConfig, guardObs != nil {
@@ -447,12 +447,38 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             guardStats.observeOnly = g.observeOnly
             guardStats.anchor = [g.anchorLayer, g.anchorHead]
         }
+        // Executor (Stage 2) is active only when guardrails are enabled, the
+        // decoder is observable, AND not observe-only. In that mode the loop
+        // decouples vocoding from decode (accumulates RVQ frames, vocodes once
+        // after the loop) so a rollback can trim the frame list, KV, monitor and
+        // token history without unwinding the streaming SpeechDecoder — matching
+        // the DESIGN.md decision that rollback is incompatible with live streaming.
+        let executorActive = (guardObs != nil) && (gConfig?.observeOnly == false)
         // Step the monitor with the anchor fraction the just-completed decode
-        // recorded. Observe-only: count fires, never roll back (Stage 1).
-        func guardStep() {
-            guard let obs = guardObs, let f = obs.lastAnchorFraction else { return }
-            if let fire = guardMonitor?.step(f) { guardStats.record(fire) }
+        // recorded; returns the confirmed failure (if any) so the executor can act.
+        // Observe-only ignores the return value (Stage 1: count fires, never roll back).
+        func guardStep() -> GuardrailFailure? {
+            guard let obs = guardObs, let f = obs.lastAnchorFraction else { return nil }
+            guard let fire = guardMonitor?.step(f) else { return nil }
+            guardStats.record(fire)
+            return fire
         }
+
+        // Executor (Stage 2) state — used only when `executorActive`. `prefillLen`
+        // is the KV position right after prefill; a rollback to decode step `k`
+        // resets the external cache to `prefillLen + k` (the MLX decoder trims its
+        // internal cache to match on the next forward). `frames`/`hiddenHistory`
+        // are the rewindable per-step records; `hiddenHistory[i]` is step i's
+        // decoder hidden state, needed to re-drive step (i+1)'s multi-code decode
+        // after a rollback. In full mode the loop appends to `frames` instead of
+        // streaming through the writer, then vocodes `frames` once after the loop.
+        let prefillLen = Int(cdCache.cacheLength)
+        var frames: [[Int32]] = []
+        var hiddenHistory: [any EmbedTensorType] = []
+        var rollbackCount = 0
+        var executorGaveUp = false
+        let rollbackDeadline = CFAbsoluteTimeGetCurrent() + (gConfig?.maxRollbackSeconds ?? 120)
+        if executorActive { frames.reserveCapacity(options.maxNewTokens) }
 
         // TODO: Remove forking logic with package with min os version upgrade
         if #available(macOS 15.0, iOS 18.0, watchOS 11.0, visionOS 2.0, *), !options.forceLegacyEmbedPath {
@@ -519,7 +545,56 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 lastCdOutput = try await codeDecoder.decode(inputEmbeds: combinedTensor, cache: cdCache, state: cdState)
                 timings.decodingPredictions += CFAbsoluteTimeGetCurrent() - decodingStart - lastCdOutput.internalCacheUpdateTime
                 timings.kvCacheUpdate += lastCdOutput.internalCacheUpdateTime
-                guardStep()
+
+                // Record this step's hidden state (full mode) BEFORE stepping the
+                // monitor: a rollback to step k re-drives step k's multi-code decode
+                // from step (k−1)'s hidden, so the history must include this step.
+                if executorActive { hiddenHistory.append(lastCdOutput.hiddenStates) }
+                if let fire = guardStep(), executorActive, !executorGaveUp {
+                    if rollbackCount >= (gConfig?.maxRetries ?? 10) || CFAbsoluteTimeGetCurrent() > rollbackDeadline {
+                        // Budget exhausted: stop rolling back and keep decoding to the
+                        // end from here (degrade to baseline — never hang).
+                        executorGaveUp = true
+                        guardStats.gaveUp = true
+                        Logging.info("Guardrail executor gave up after \(rollbackCount) rollbacks "
+                            + "(\(fire.failure.rawValue) at step \(stepIndex)); continuing without rollback")
+                    } else {
+                        // Rewind to decode step `target` (≤ stepIndex). Step `stepIndex`
+                        // was decoded but not yet committed (no frame appended, no next
+                        // token sampled), so discarding steps [target, stepIndex] leaves
+                        // no half-applied state.
+                        let target = max(0, min(fire.rollbackStep, stepIndex))
+                        cdCache.cacheLength = Int32(prefillLen + target)   // MLX trims internal cache on next forward
+                        if frames.count > target { frames.removeLast(frames.count - target) }
+                        let resumeHidden: any EmbedTensorType =
+                            target > 0 ? hiddenHistory[target - 1] : prefillResult.lastCdOutput.hiddenStates
+                        if hiddenHistory.count > target { hiddenHistory.removeLast(hiddenHistory.count - target) }
+                        lastCdOutput = CodeDecoderOutput(
+                            logits: lastCdOutput.logits,        // placeholder; overwritten by step `target`'s decode before any read
+                            hiddenStates: resumeHidden,
+                            keyCacheUpdates: nil, valueCacheUpdates: nil)
+                        // Token history holds [seed, out(0)…out(stepIndex−1)] = stepIndex+1
+                        // entries; keep [0, target] so generatedTokens[target] is the
+                        // input token to step `target`.
+                        if generatedTokens.count > target + 1 {
+                            generatedTokens.removeLast(generatedTokens.count - (target + 1))
+                        }
+                        code0 = generatedTokens[target]
+                        guardMonitor?.rollback(to: target)
+                        guardObs?.truncateGuardrailTrajectory(to: target)
+                        // Stochastic sampling (temp>0) — reseeding varies the retry so a
+                        // deterministic stall is escaped. Deterministic per run.
+                        sampler.reseed(UInt64(0xA5A5A5 &+ UInt64(rollbackCount) &* 2_654_435_761 &+ UInt64(target)))
+                        guardStats.rollbacks += 1
+                        guardStats.rewoundAudioSeconds += Double(stepIndex - target) / 12.5
+                        guardStats.addedWallSeconds += CFAbsoluteTimeGetCurrent() - stepStart
+                        rollbackCount += 1
+                        Logging.info("Guardrail rollback #\(rollbackCount): \(fire.failure.rawValue) at step "
+                            + "\(stepIndex) → rewind to \(target) (−\(stepIndex - target) steps)")
+                        stepIndex = target
+                        continue                                // abort this step; re-decode from `target`
+                    }
+                }
 
                 let samplingStart = CFAbsoluteTimeGetCurrent()
                 code0 = await sampler.sampleCodec0(
@@ -532,7 +607,12 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 generatedTokens.append(code0)
                 timings.decodingSampling += CFAbsoluteTimeGetCurrent() - samplingStart
 
-                if !(try await writer.append(rvqFrame, stepStart: stepStart, loopTimings: &timings)) {
+                // Full mode (executor) accumulates frames for a single post-loop
+                // vocode pass; observe/off mode streams through the writer as before
+                // (unchanged, bit-identical audio — the Stage-1 fidelity invariant).
+                if executorActive {
+                    frames.append(rvqFrame)
+                } else if !(try await writer.append(rvqFrame, stepStart: stepStart, loopTimings: &timings)) {
                     stopRequested = true
                     break
                 }
@@ -612,7 +692,9 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 let decodingStart = CFAbsoluteTimeGetCurrent()
                 lastCdOutput = try await codeDecoder.decode(inputEmbeds: combinedArr, cache: cdCache, state: cdState)
                 timings.decodingPredictions += CFAbsoluteTimeGetCurrent() - decodingStart
-                guardStep()
+                // Legacy path is observe-only (the executor runs on the MLX async
+                // path); the CoreML sync decoder is not GuardrailObservable anyway.
+                _ = guardStep()
 
                 let samplingStart = CFAbsoluteTimeGetCurrent()
                 code0 = await sampler.sampleCodec0(
@@ -642,6 +724,19 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                             stepIndex, stepMs, timings.decodingLoop * 1000 / Double(stepIndex)))
                 }
             }
+        }
+
+        // Full mode decoupled vocoding from the loop so rollbacks could trim the
+        // frame list; the final (post-rollback) frames are vocoded here in one
+        // pass through the writer. Guardrails-full is not a live-streaming mode
+        // (see DESIGN.md), so emitting all audio at the end is expected.
+        if executorActive {
+            for frame in frames {
+                _ = try await writer.append(frame, stepStart: CFAbsoluteTimeGetCurrent(), loopTimings: &timings)
+            }
+            Logging.info("Guardrail executor: \(guardStats.rollbacks) rollback(s), "
+                + "\(String(format: "%.1f", guardStats.rewoundAudioSeconds))s audio rewound, "
+                + "\(frames.count) frames vocoded\(guardStats.gaveUp ? " (gave up: budget)" : "")")
         }
 
         // Drain the in-flight decode from the last completed flush, then flush any
@@ -674,9 +769,16 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                     "{\"type\":\"\($0.failure.rawValue)\",\"fire\":\($0.fireStep),\"rollback\":\($0.rollbackStep)}"
                 }.joined(separator: ",")
                 let fstr = traj.map { String($0) }.joined(separator: ",")
+                let diag = obs.guardrailDiagnostics()
+                let gaStr = diag.globalArgmax.map { String($0) }.joined(separator: ",")
+                let tmStr = diag.textMass.map { String($0) }.joined(separator: ",")
                 let json = "{\"anchor\":[\(gConfig!.anchorLayer),\(gConfig!.anchorHead)],"
                     + "\"ntok\":\(tokenizeResult.textTokenIds.count),\"steps\":\(stepIndex),"
-                    + "\"fires\":[\(fires)],\"f\":[\(fstr)]}"
+                    + "\"textStart\":\(diag.textStart),\"textEnd\":\(diag.textEnd),"
+                    + "\"fires\":[\(fires)],\"f\":[\(fstr)],"
+                    + "\"rollbacks\":\(guardStats.rollbacks),\"gaveUp\":\(guardStats.gaveUp),"
+                    + "\"rewoundAudioSeconds\":\(guardStats.rewoundAudioSeconds),"
+                    + "\"globalArgmax\":[\(gaStr)],\"textMass\":[\(tmStr)]}"
                 try? json.write(toFile: out, atomically: true, encoding: .utf8)
                 Logging.info("Guardrail trajectory (\(traj.count) steps, \(guardStats.events.count) fires) -> \(out)")
             }

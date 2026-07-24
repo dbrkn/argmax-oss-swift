@@ -24,6 +24,11 @@ public protocol GuardrailObservable: AnyObject {
     /// The recorded `f(t)` trajectory (empty unless recording was requested).
     func guardrailTrajectory() -> [Float]
 
+    /// Diagnostics for anchor validation: per-step global argmax (absolute KV
+    /// position) + text-span attention mass, and the span itself. Empty/-1 when
+    /// not recording.
+    func guardrailDiagnostics() -> (globalArgmax: [Int], textMass: [Float], textStart: Int, textEnd: Int)
+
     /// Truncate the recorded trajectory to `n` steps (mirrors a rollback).
     func truncateGuardrailTrajectory(to n: Int)
 
@@ -40,4 +45,7 @@ public protocol GuardrailObservable: AnyObject {
 extension GuardrailObservable {
     // Default no-op so observe-only decoders need not implement it.
     public func guardrailRollback(toDecodeStep decodeStep: Int) {}
+    public func guardrailDiagnostics() -> (globalArgmax: [Int], textMass: [Float], textStart: Int, textEnd: Int) {
+        ([], [], -1, -1)
+    }
 }

@@ -75,8 +75,28 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     }
 
     /// Validated presets. `default06bBase` (L6H0) and `default17bBase` (L3H0).
-    public static let default06bBase = GuardrailConfig(anchorLayer: 6, anchorHead: 0, biasLayer: 6, biasHeads: [0, 1])
-    public static let default17bBase = GuardrailConfig(anchorLayer: 3, anchorHead: 0, biasLayer: 3, biasHeads: [0, 1])
+    ///
+    /// **`monitor.fairInit` is lowered from RD-655's 40 to 15 for our regime.**
+    /// RD-655 calibrated 40 on long single-shot texts that dwell ~40 decode
+    /// steps per coverage bin. Our voice-clone synthesis is short (≈31 text
+    /// tokens over ≈100 decode steps → ≈13 steps/bin), so at 40 the commit
+    /// threshold `commit_frac·fair`=12 marks nearly every genuinely-covered bin
+    /// as under-dwelt → a false-positive skip flood. Measured on a captured
+    /// 100%-monotone (healthy) `f(t)`: fairInit=40 → 60 fires, fairInit≤20 → 0.
+    /// 15 leaves margin below the flood knee while keeping the stall path (which
+    /// keys off frozen coverage, not dwell) intact. The pure
+    /// `CoverageMonitorConfig` default stays 40 so RD-655 parity tests are
+    /// unaffected; only the deployed guardrail presets carry the retune.
+    public static let default06bBase: GuardrailConfig = {
+        var c = GuardrailConfig(anchorLayer: 6, anchorHead: 0, biasLayer: 6, biasHeads: [0, 1])
+        c.monitor.fairInit = 15
+        return c
+    }()
+    public static let default17bBase: GuardrailConfig = {
+        var c = GuardrailConfig(anchorLayer: 3, anchorHead: 0, biasLayer: 3, biasHeads: [0, 1])
+        c.monitor.fairInit = 15
+        return c
+    }()
 
     /// Pick the anchor preset for the loaded model. The layer count is the
     /// robust discriminator (0.6B talker has more layers than the 1.7B's
