@@ -95,12 +95,13 @@ public final class AnchorProbe {
         guard biasActive, biasLambda > 0, !biasHeads.isEmpty else { return nil }
         let end = min(textEnd, t)
         guard end > textStart else { return nil }
-        // Huber penalty over the text span: quadratic within ±delta of center, linear beyond.
+        // Normalized Huber penalty over the text span (matches hook.py: quadratic
+        // core 0.5·a²/δ within δ, unit-slope linear a−0.5δ beyond).
         var pen = [Float](repeating: 0, count: t)
         let d = biasDelta
         for pos in textStart..<end {
             let dist = abs(Double(pos) - biasCenter)
-            let huber = dist <= d ? 0.5 * dist * dist : d * (dist - 0.5 * d)
+            let huber = dist < d ? 0.5 * dist * dist / d : dist - 0.5 * d
             pen[pos] = Float(-biasLambda * huber)
         }
         let penRow = MLXArray(pen, [1, 1, 1, t])                 // (1,1,1,T)
@@ -127,7 +128,20 @@ public final class AnchorProbe {
         // (headDim) · (headDim, T) -> (T); a separate score, not the SDPA path.
         let qh = q[0, anchorHead, 0, 0...]                  // (headDim)
         let kh = cachedK[0, kvHead]                          // (T, headDim)
-        let scores = (kh.matmul(qh) * scale)                // (T)
+        var scores = (kh.matmul(qh) * scale)                // (T)
+        // Read f POST-bias when the anchor head is itself biased (matches
+        // hook.py): the monitor must judge the *corrected* trajectory, else it
+        // never sees the soft-align bias working and keeps re-firing. Adds the
+        // same Huber penalty the SDPA path applies, over the text span.
+        if biasActive, biasLambda > 0, biasHeads.contains(anchorHead) {
+            var pen = [Float](repeating: 0, count: t)
+            for pos in textStart..<end {
+                let dist = abs(Double(pos) - biasCenter)
+                let huber = dist <= biasDelta ? 0.5 * dist * dist / biasDelta : dist - 0.5 * biasDelta
+                pen[pos] = Float(-biasLambda * huber)
+            }
+            scores = scores + MLXArray(pen, [t])
+        }
         let seg = scores[textStart ..< end]
         let am = textStart + argMax(seg).item(Int.self)     // absolute attended text position
         let f = Float(am - textStart) / Float(max(1, textEnd - textStart))
