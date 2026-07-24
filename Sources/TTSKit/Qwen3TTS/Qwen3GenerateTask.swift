@@ -811,7 +811,16 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                     + "\"rollbacks\":\(guardStats.rollbacks),\"gaveUp\":\(guardStats.gaveUp),"
                     + "\"rewoundAudioSeconds\":\(guardStats.rewoundAudioSeconds),"
                     + "\"globalArgmax\":[\(gaStr)],\"textMass\":[\(tmStr)]}"
-                try? json.write(toFile: out, atomically: true, encoding: .utf8)
+                // Append one JSONL line per generation loop. Chunked generation
+                // calls this once per chunk, so the consumer aggregates across
+                // lines (a single overwrite would keep only the last chunk).
+                let line = json + "\n"
+                let url = URL(fileURLWithPath: out)
+                if let handle = try? FileHandle(forWritingTo: url) {
+                    handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try? handle.close()
+                } else {
+                    try? line.write(toFile: out, atomically: true, encoding: .utf8)
+                }
                 Logging.info("Guardrail trajectory (\(traj.count) steps, \(guardStats.events.count) fires) -> \(out)")
             }
             obs.endGuardrailObservation()
