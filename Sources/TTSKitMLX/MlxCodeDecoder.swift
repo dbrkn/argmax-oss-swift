@@ -159,6 +159,7 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailO
 
         let (logitsArray, hiddenArray) = talker(x, cache: internalCache, probe: anchorProbe)
         eval(logitsArray, hiddenArray)
+        anchorProbe?.flushScanStep()   // head-scan readback (no-op unless scanning)
 
         // Mirror the consumed positions into the external cache so the
         // generation loop's cacheLength / isFull bookkeeping stays correct.
@@ -176,8 +177,13 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailO
     public func beginGuardrailObservation(
         anchorLayer: Int, anchorHead: Int, textStart: Int, textEnd: Int, recordTrajectory: Bool
     ) {
+        // GUARDRAIL_HEADSCAN_OUT (tuning only): also record every head's text
+        // argmax on every layer, dumped as one JSONL line per generation at
+        // endGuardrailObservation() for offline anchor re-selection.
+        let scan = ProcessInfo.processInfo.environment["GUARDRAIL_HEADSCAN_OUT"] != nil
         anchorProbe = AnchorProbe(anchorLayer: anchorLayer, anchorHead: anchorHead,
-                                  textStart: textStart, textEnd: textEnd, recordTrajectory: recordTrajectory)
+                                  textStart: textStart, textEnd: textEnd,
+                                  recordTrajectory: recordTrajectory, headScan: scan)
     }
     public var lastAnchorFraction: Float? { anchorProbe?.lastF }
     public func guardrailTrajectory() -> [Float] { anchorProbe?.trajectory ?? [] }
@@ -195,7 +201,25 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailO
         p.biasLayer = biasLayer
         p.biasHeads = Set(biasHeads)
     }
-    public func endGuardrailObservation() { anchorProbe = nil }
+    public func endGuardrailObservation() {
+        // Head scan: append this generation's all-layer/all-head argmax
+        // trajectory as one JSONL line (chunked generation → one line per chunk).
+        if let p = anchorProbe, p.headScan, !p.scanSteps.isEmpty,
+           let out = ProcessInfo.processInfo.environment["GUARDRAIL_HEADSCAN_OUT"] {
+            let steps = p.scanSteps.map { row in "[\(row.map(String.init).joined(separator: ","))]" }
+                .joined(separator: ",")
+            let line = "{\"textStart\":\(p.textStart),\"textEnd\":\(p.textEnd),"
+                + "\"layers\":\(p.scanLayers),\"heads\":\(p.scanHeads),"
+                + "\"steps\":\(p.scanSteps.count),\"scan\":[\(steps)]}\n"
+            let url = URL(fileURLWithPath: out)
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try? handle.close()
+            } else {
+                try? line.write(toFile: out, atomically: true, encoding: .utf8)
+            }
+        }
+        anchorProbe = nil
+    }
 
     /// Re-synchronize the internal MLX cache with the external cache position.
     private func syncInternalCache(to position: Int) throws {

@@ -231,6 +231,11 @@ final class TalkerAttention {
             probe.observe(q: q, cachedK: cachedK, scale: pow(Float(headDim), -0.5),
                           grp: numHeads / numKVHeads)
         }
+        // Head scan (anchor re-calibration): record every head's text argmax on
+        // EVERY layer. Observe-only tuning runs; lazy, flushed by the decoder.
+        if let probe, probe.headScan, seqLen == 1 {
+            probe.observeScan(layer: layerIndex, q: q, cachedK: cachedK)
+        }
 
         // Soft-align bias (RD-655 Stage-2 recovery): on the bias layer during a
         // biased-retry step, add the Huber penalty to the SDPA scores of the bias

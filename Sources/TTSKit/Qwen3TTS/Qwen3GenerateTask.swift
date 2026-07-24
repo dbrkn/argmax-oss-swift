@@ -190,7 +190,8 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
             options: options,
             pipelineStart: pipelineStart,
             callback: callback,
-            baseTimings: timings
+            baseTimings: timings,
+            chunkText: text
         )
         timings.merge(loopResult.timings)
         timings.timeToFirstBuffer = loopResult.timings.timeToFirstBuffer
@@ -385,7 +386,8 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         options: GenerationOptions,
         pipelineStart: CFAbsoluteTime,
         callback: SpeechCallback,
-        baseTimings: SpeechTimings
+        baseTimings: SpeechTimings,
+        chunkText: String = ""
     ) async throws -> GenerationLoopResult {
         let cdCache = prefillResult.cdCache
         var lastCdOutput = prefillResult.lastCdOutput
@@ -804,7 +806,13 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 let diag = obs.guardrailDiagnostics()
                 let gaStr = diag.globalArgmax.map { String($0) }.joined(separator: ",")
                 let tmStr = diag.textMass.map { String($0) }.joined(separator: ",")
+                // JSON-escape the chunk text so the labeler can align each
+                // chunk's transcript against exactly what this loop synthesized.
+                let escapedText = (try? String(
+                    data: JSONSerialization.data(withJSONObject: [chunkText]), encoding: .utf8))
+                    .map { String($0.dropFirst().dropLast()) } ?? "\"\""
                 let json = "{\"anchor\":[\(gConfig!.anchorLayer),\(gConfig!.anchorHead)],"
+                    + "\"text\":\(escapedText),"
                     + "\"ntok\":\(tokenizeResult.textTokenIds.count),\"steps\":\(stepIndex),"
                     + "\"textStart\":\(diag.textStart),\"textEnd\":\(diag.textEnd),"
                     + "\"fires\":[\(fires)],\"f\":[\(fstr)],"

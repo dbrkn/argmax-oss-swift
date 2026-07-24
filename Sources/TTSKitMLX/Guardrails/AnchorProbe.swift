@@ -45,6 +45,22 @@ public final class AnchorProbe {
     public private(set) var textMass: [Float] = []
     private let record: Bool
 
+    // MARK: Head scan (anchor re-calibration, observe-only tuning runs)
+    //
+    // When `headScan` is on, every decode step records the text-span argmax of
+    // EVERY head on EVERY layer (not just the anchor head), so an offline sweep
+    // can rank alternative anchor heads for a new regime (e.g. chunked
+    // voice-clone). The per-layer scores stay lazy on-device (`scanStepBuf`)
+    // and are read back once per step via ``flushScanStep()``; observe-only,
+    // never active alongside rollbacks.
+    public let headScan: Bool
+    public private(set) var scanLayers = 0
+    public private(set) var scanHeads = 0
+    /// Per step: layer-major flattened `[scanLayers × scanHeads]` absolute
+    /// argmax positions within the text span.
+    public private(set) var scanSteps: [[Int32]] = []
+    private var scanStepBuf: [Int: MLXArray] = [:]
+
     // MARK: Soft-align bias (RD-655 Stage-2 recovery)
     //
     // Set by the orchestrator each decode step while a rollback recovery is
@@ -61,12 +77,14 @@ public final class AnchorProbe {
     public var biasLambda: Double = 0
     public var biasDelta: Double = 10
 
-    public init(anchorLayer: Int, anchorHead: Int, textStart: Int, textEnd: Int, recordTrajectory: Bool = false) {
+    public init(anchorLayer: Int, anchorHead: Int, textStart: Int, textEnd: Int,
+                recordTrajectory: Bool = false, headScan: Bool = false) {
         self.anchorLayer = anchorLayer
         self.anchorHead = anchorHead
         self.textStart = max(0, textStart)
         self.textEnd = max(textStart + 1, textEnd)
         self.record = recordTrajectory
+        self.headScan = headScan
     }
 
     /// Reset for a new generation (or a rollback replay truncation handled by
@@ -84,6 +102,36 @@ public final class AnchorProbe {
         if trajectory.count > n { trajectory.removeLast(trajectory.count - n) }
         if globalArgmax.count > n { globalArgmax.removeLast(globalArgmax.count - n) }
         if textMass.count > n { textMass.removeLast(textMass.count - n) }
+    }
+
+    /// Head scan: record the text-span argmax of every head on `layer` for this
+    /// decode step. Lazy (no host sync here) — ``flushScanStep()`` reads the
+    /// whole step's layers back in one transfer. Scale is omitted: argmax is
+    /// invariant to a positive scalar.
+    func observeScan(layer: Int, q: MLXArray, cachedK: MLXArray) {
+        let t = cachedK.dim(2)
+        let end = min(textEnd, t)
+        guard end > textStart else { return }
+        let numHeads = q.dim(1)
+        let numKV = cachedK.dim(1)
+        let grp = numHeads / numKV
+        let qg = q[0, 0..., 0, 0...].reshaped(numKV, grp, q.dim(3))     // (numKV, grp, hd)
+        let kAll = cachedK[0]                                            // (numKV, T, hd)
+        let scores = qg.matmul(kAll.transposed(0, 2, 1))                 // (numKV, grp, T)
+        let seg = scores[0..., 0..., textStart ..< end]
+        scanStepBuf[layer] = argMax(seg, axis: -1).reshaped(numHeads) + textStart
+        if layer >= scanLayers { scanLayers = layer + 1 }
+        scanHeads = numHeads
+    }
+
+    /// Read this step's buffered per-layer scans back to host (one transfer).
+    /// Called by the decoder once per forward, after its own eval.
+    public func flushScanStep() {
+        guard headScan, !scanStepBuf.isEmpty else { return }
+        let layers = scanStepBuf.keys.sorted()
+        let stacked = concatenated(layers.compactMap { scanStepBuf[$0] }, axis: 0)
+        scanSteps.append(stacked.asType(.int32).asArray(Int32.self))
+        scanStepBuf.removeAll(keepingCapacity: true)
     }
 
     /// Additive attention-score bias for the bias layer during a biased-retry
