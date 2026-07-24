@@ -35,6 +35,14 @@ public protocol GuardrailObservable: AnyObject {
     /// Disarm and clear the probe at end of generation.
     func endGuardrailObservation()
 
+    /// Executor (Stage 2): set the soft-align bias for the next forward. While
+    /// `active`, the decoder adds `−lambda·huber(|pos − center|; delta)` to the
+    /// attention scores of `biasHeads` on `biasLayer` over the synthesis-text KV
+    /// span, pulling those heads onto the on-pace text position. Called each step
+    /// during a biased-retry window; `active: false` clears it (no-op forward).
+    /// Default no-op for observe-only decoders.
+    func setGuardrailBias(active: Bool, center: Double, lambda: Double, delta: Double, biasLayer: Int, biasHeads: [Int])
+
     /// Executor (Stage 2): rewind the decoder's internal KV state to
     /// `decodeStep` decode steps after the prefill, so the next forward
     /// re-decodes from there. O(1) trim (append-only cache). The orchestrator
@@ -45,6 +53,7 @@ public protocol GuardrailObservable: AnyObject {
 extension GuardrailObservable {
     // Default no-op so observe-only decoders need not implement it.
     public func guardrailRollback(toDecodeStep decodeStep: Int) {}
+    public func setGuardrailBias(active: Bool, center: Double, lambda: Double, delta: Double, biasLayer: Int, biasHeads: [Int]) {}
     public func guardrailDiagnostics() -> (globalArgmax: [Int], textMass: [Float], textStart: Int, textEnd: Int) {
         ([], [], -1, -1)
     }

@@ -186,6 +186,15 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailO
         return (p.globalArgmax, p.textMass, p.textStart, p.textEnd)
     }
     public func truncateGuardrailTrajectory(to n: Int) { anchorProbe?.truncateTrajectory(to: n) }
+    public func setGuardrailBias(active: Bool, center: Double, lambda: Double, delta: Double, biasLayer: Int, biasHeads: [Int]) {
+        guard let p = anchorProbe else { return }
+        p.biasActive = active
+        p.biasCenter = center
+        p.biasLambda = lambda
+        p.biasDelta = delta
+        p.biasLayer = biasLayer
+        p.biasHeads = Set(biasHeads)
+    }
     public func endGuardrailObservation() { anchorProbe = nil }
 
     /// Re-synchronize the internal MLX cache with the external cache position.

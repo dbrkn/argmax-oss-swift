@@ -79,6 +79,10 @@ public final class CoverageMonitor {
     /// Number of steps currently held = the live decode position.
     public var nSteps: Int { fHist.count }
 
+    /// The `f(t)` history so far (rewound by `rollback(to:)`); the soft-align
+    /// pace integrator reads this to track the on-pace text position.
+    public var fHistory: [Float] { fHist }
+
     /// Advance one decode step with this step's `f`. Returns a failure on the
     /// firing step, else `nil`.
     @discardableResult

@@ -480,6 +480,19 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         let rollbackDeadline = CFAbsoluteTimeGetCurrent() + (gConfig?.maxRollbackSeconds ?? 120)
         if executorActive { frames.reserveCapacity(options.maxNewTokens) }
 
+        // Soft-align recovery bias (RD-655 Stage-2). Armed on a rollback; while
+        // armed it nudges the bias heads onto the on-pace text position over the
+        // biased-retry window. `lambda == 0` disables it (reseed-only recovery).
+        var softAlignCfg = SoftAlignConfig()
+        if let g = gConfig { softAlignCfg.lambda = g.lambda; softAlignCfg.delta = g.delta; softAlignCfg.stride = g.stride }
+        let softAlign: SoftAlign? =
+            (executorActive && (gConfig?.lambda ?? 0) > 0)
+            ? SoftAlign(config: softAlignCfg, biasHeads: gConfig!.biasHeads) : nil
+        // Absolute text-KV span (set on the probe at arm time in prefill).
+        let guardSpan = guardObs?.guardrailDiagnostics()
+        let biasTextStart = guardSpan?.textStart ?? -1
+        let biasTextEnd = guardSpan?.textEnd ?? -1
+
         // TODO: Remove forking logic with package with min os version upgrade
         if #available(macOS 15.0, iOS 18.0, watchOS 11.0, visionOS 2.0, *), !options.forceLegacyEmbedPath {
             let textPadEmbedTensor: MLTensor = try await textProjector.project(tokenId: Qwen3TTSConstants.textPAD)
@@ -541,6 +554,20 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 let combinedTensor = EmbedUtilities.addEmbeddings(codecHiddenTensor, textEmbedTensor)
                 timings.textProjection += CFAbsoluteTimeGetCurrent() - textProjStart
 
+                // Soft-align: set this step's recovery bias before the decode.
+                // Only active inside a biased-retry window (armed + shouldApply);
+                // otherwise pushes active:false so no stale bias leaks into the
+                // forward. The pace integrator reads the (rewind-aware) f-history.
+                if executorActive, let sa = softAlign, sa.armed, biasTextStart >= 0 {
+                    sa.setStep(stepIndex)
+                    sa.updateCenter(fHist: guardMonitor?.fHistory ?? [], textStart: biasTextStart, textEnd: biasTextEnd)
+                    guardObs?.setGuardrailBias(
+                        active: sa.shouldApply(),
+                        center: sa.centerFor(textStart: biasTextStart),
+                        lambda: sa.lambda, delta: sa.delta,
+                        biasLayer: gConfig!.biasLayer, biasHeads: gConfig!.biasHeads)
+                }
+
                 let decodingStart = CFAbsoluteTimeGetCurrent()
                 lastCdOutput = try await codeDecoder.decode(inputEmbeds: combinedTensor, cache: cdCache, state: cdState)
                 timings.decodingPredictions += CFAbsoluteTimeGetCurrent() - decodingStart - lastCdOutput.internalCacheUpdateTime
@@ -582,6 +609,11 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                         code0 = generatedTokens[target]
                         guardMonitor?.rollback(to: target)
                         guardObs?.truncateGuardrailTrajectory(to: target)
+                        // Arm the soft-align bias over the rolled-back span [target,
+                        // fireStep]: on the retry the bias heads are pulled onto the
+                        // on-pace text position, forcing the stuck anchor forward
+                        // (the recovery reseed alone can't achieve).
+                        softAlign?.arm(skipStep: fire.fireStep)
                         // Stochastic sampling (temp>0) — reseeding varies the retry so a
                         // deterministic stall is escaped. Deterministic per run.
                         sampler.reseed(UInt64(0xA5A5A5 &+ UInt64(rollbackCount) &* 2_654_435_761 &+ UInt64(target)))

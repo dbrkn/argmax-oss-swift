@@ -232,9 +232,21 @@ final class TalkerAttention {
                           grp: numHeads / numKVHeads)
         }
 
+        // Soft-align bias (RD-655 Stage-2 recovery): on the bias layer during a
+        // biased-retry step, add the Huber penalty to the SDPA scores of the bias
+        // heads over the text span. This DOES change the attention output (the
+        // directed intervention). Inactive → `biasScores` is nil and SDPA is
+        // bit-identical to the observe/off path.
+        var effectiveMask = mask
+        if let probe, seqLen == 1, layerIndex == probe.biasLayer,
+           let bias = probe.biasScores(t: cachedK.dim(2), numHeads: numHeads) {
+            let b = bias.asType(q.dtype)
+            effectiveMask = mask.map { $0 + b } ?? b
+        }
+
         let out = MLXFast.scaledDotProductAttention(
             queries: q, keys: cachedK, values: cachedV,
-            scale: pow(Float(headDim), -0.5), mask: mask
+            scale: pow(Float(headDim), -0.5), mask: effectiveMask
         )
         return oProj(out.transposed(0, 2, 1, 3).reshaped(batch, seqLen, numHeads * headDim))
     }

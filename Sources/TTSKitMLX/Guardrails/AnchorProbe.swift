@@ -45,6 +45,22 @@ public final class AnchorProbe {
     public private(set) var textMass: [Float] = []
     private let record: Bool
 
+    // MARK: Soft-align bias (RD-655 Stage-2 recovery)
+    //
+    // Set by the orchestrator each decode step while a rollback recovery is
+    // armed; read by `TalkerAttention` on `biasLayer`. When `biasActive`, an
+    // additive Huber penalty `−lambda·huber(|pos − biasCenter|; biasDelta)` over
+    // the text span `[textStart, textEnd)` is added to the attention scores of
+    // `biasHeads`, pulling those heads back onto the on-pace text position. This
+    // *does* change the SDPA output (and thus the audio) — it is the directed
+    // intervention, active only during a bounded biased-retry window.
+    public var biasLayer: Int = -1
+    public var biasHeads: Set<Int> = []
+    public var biasActive = false
+    public var biasCenter: Double = 0
+    public var biasLambda: Double = 0
+    public var biasDelta: Double = 10
+
     public init(anchorLayer: Int, anchorHead: Int, textStart: Int, textEnd: Int, recordTrajectory: Bool = false) {
         self.anchorLayer = anchorLayer
         self.anchorHead = anchorHead
@@ -68,6 +84,31 @@ public final class AnchorProbe {
         if trajectory.count > n { trajectory.removeLast(trajectory.count - n) }
         if globalArgmax.count > n { globalArgmax.removeLast(globalArgmax.count - n) }
         if textMass.count > n { textMass.removeLast(textMass.count - n) }
+    }
+
+    /// Additive attention-score bias for the bias layer during a biased-retry
+    /// step, or `nil` when inactive. Shape `(1, numHeads, 1, T)`, broadcasting
+    /// over the single decode query: `biasHeads` rows carry the Huber penalty
+    /// over `[textStart, min(textEnd, T))`, all other rows/positions are 0. Added
+    /// to the SDPA mask, so 0 is a no-op for untouched heads/positions.
+    func biasScores(t: Int, numHeads: Int) -> MLXArray? {
+        guard biasActive, biasLambda > 0, !biasHeads.isEmpty else { return nil }
+        let end = min(textEnd, t)
+        guard end > textStart else { return nil }
+        // Huber penalty over the text span: quadratic within ±delta of center, linear beyond.
+        var pen = [Float](repeating: 0, count: t)
+        let d = biasDelta
+        for pos in textStart..<end {
+            let dist = abs(Double(pos) - biasCenter)
+            let huber = dist <= d ? 0.5 * dist * dist : d * (dist - 0.5 * d)
+            pen[pos] = Float(-biasLambda * huber)
+        }
+        let penRow = MLXArray(pen, [1, 1, 1, t])                 // (1,1,1,T)
+        // Per-head gate: 1 for bias heads, 0 otherwise → (1, numHeads, 1, 1).
+        var gate = [Float](repeating: 0, count: numHeads)
+        for h in biasHeads where h < numHeads { gate[h] = 1 }
+        let gateCol = MLXArray(gate, [1, numHeads, 1, 1])
+        return penRow * gateCol                                  // broadcast → (1, numHeads, 1, T)
     }
 
     /// Compute and record `f(t)` from the anchor head's scores against the
