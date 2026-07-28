@@ -34,6 +34,10 @@ public final class AnchorProbe {
 
     /// Most recent decode step's `f(t)` (nil before the first decode step).
     public private(set) var lastF: Float?
+    /// Most recent step's attention mass inside the text span (softmax over the
+    /// full KV row). Computed every step — the v2 BindingMonitor consumes it
+    /// live (mass collapse is half of the binding-failure signature).
+    public private(set) var lastTextMass: Float?
     /// Full trajectory when recording is on (offline anchor validation).
     public private(set) var trajectory: [Float] = []
     /// Diagnostics (recorded alongside `trajectory` when recording): per step the
@@ -194,13 +198,15 @@ public final class AnchorProbe {
         let am = textStart + argMax(seg).item(Int.self)     // absolute attended text position
         let f = Float(am - textStart) / Float(max(1, textEnd - textStart))
         lastF = f
+        // Text-span attention mass every step (softmax over the full KV row):
+        // consumed live by the v2 BindingMonitor, recorded for diagnostics.
+        let probs = softmax(scores, axis: -1)
+        let mass = probs[textStart ..< end].sum().item(Float.self)
+        lastTextMass = mass
         if record {
             trajectory.append(f)
-            // Diagnostics: where does the head actually look, and how much mass
-            // is inside the text span? (softmax over the full KV row.)
-            let probs = softmax(scores, axis: -1)
             globalArgmax.append(argMax(scores).item(Int.self))
-            textMass.append(probs[textStart ..< end].sum().item(Float.self))
+            textMass.append(mass)
         }
     }
 }

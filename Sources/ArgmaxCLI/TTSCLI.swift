@@ -392,13 +392,15 @@ struct TTSCLI: AsyncParsableCommand {
             }
         }
 
-        // Decoding guardrails (RD-655). Observe-only detects + logs (audio
-        // unchanged); full also rolls back. Anchor head auto-resolves by model.
+        // Decoding guardrails. Observe-only detects + logs (audio unchanged);
+        // full = RD-655 coverage rollback; v2 = BindingMonitor + restart-from-
+        // prefill (unchunked). Anchor head auto-resolves by model.
         var guardrailConfig: GuardrailConfig?
         if guardrails != "off" {
             var g = GuardrailConfig.resolve(versionDir: versionDir ?? model.versionDir)
             g.enabled = true
             g.observeOnly = (guardrails == "observe")
+            g.v2 = (guardrails == "v2")
             g.recordTrajectory = true
             guardrailConfig = g
         }

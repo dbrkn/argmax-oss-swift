@@ -21,6 +21,11 @@ public protocol GuardrailObservable: AnyObject {
     /// The most recent decode step's `f(t) ∈ [0,1]` (nil before the first step).
     var lastAnchorFraction: Float? { get }
 
+    /// The most recent step's attention mass inside the text span (nil before
+    /// the first step, or if the decoder doesn't compute it). Consumed by the
+    /// v2 BindingMonitor. Default nil.
+    var lastAnchorTextMass: Float? { get }
+
     /// The recorded `f(t)` trajectory (empty unless recording was requested).
     func guardrailTrajectory() -> [Float]
 
@@ -53,6 +58,7 @@ public protocol GuardrailObservable: AnyObject {
 extension GuardrailObservable {
     // Default no-op so observe-only decoders need not implement it.
     public func guardrailRollback(toDecodeStep decodeStep: Int) {}
+    public var lastAnchorTextMass: Float? { nil }
     public func setGuardrailBias(active: Bool, center: Double, lambda: Double, delta: Double, biasLayer: Int, biasHeads: [Int]) {}
     public func guardrailDiagnostics() -> (globalArgmax: [Int], textMass: [Float], textStart: Int, textEnd: Int) {
         ([], [], -1, -1)

@@ -441,8 +441,12 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         let gConfig = options.guardrails
         let guardObs: GuardrailObservable? =
             (gConfig?.enabled == true) ? (codeDecoder as? GuardrailObservable) : nil
-        let guardMonitor: CoverageMonitor? = guardObs == nil ? nil
+        // v2 replaces the RD-655 coverage monitor with the BindingMonitor.
+        let isV2 = gConfig?.v2 == true
+        let guardMonitor: CoverageMonitor? = (guardObs == nil || isV2) ? nil
             : CoverageMonitor(ntok: max(1, tokenizeResult.textTokenIds.count), config: gConfig!.monitor)
+        let bindingMonitor: BindingMonitor? =
+            (guardObs != nil && isV2) ? BindingMonitor(config: gConfig!.binding) : nil
         var guardStats = GuardrailStats()
         if let g = gConfig, guardObs != nil {
             guardStats.active = true
@@ -579,6 +583,52 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 // monitor: a rollback to step k re-drives step k's multi-code decode
                 // from step (k−1)'s hidden, so the history must include this step.
                 if executorActive { hiddenHistory.append(lastCdOutput.hiddenStates) }
+
+                // Guardrails v2: prompt-binding detection + restart-from-prefill.
+                // One decision at ~130 steps; a confirmed binding failure cannot
+                // be fixed by mid-stream rollback (validated: reseed-from-midway
+                // re-enters the same degenerate basin), so v2 restarts the whole
+                // generation from the prefill with a fresh first draw.
+                if let bm = bindingMonitor, let f = guardObs?.lastAnchorFraction {
+                    if case .bindingFailure(let atStep) = bm.step(f: f, textMass: guardObs?.lastAnchorTextMass) {
+                        guardStats.record(GuardrailFailure(
+                            failure: .hallucination, fireStep: atStep, rollbackStep: 0,
+                            bins: [], fairCount: 0, nBins: 0))
+                        if !executorActive || executorGaveUp {
+                            // observe mode: verdict recorded, generation untouched
+                        } else if rollbackCount >= (gConfig?.maxRetries ?? 10)
+                            || CFAbsoluteTimeGetCurrent() > rollbackDeadline {
+                            executorGaveUp = true
+                            guardStats.gaveUp = true
+                            Logging.info("Guardrail v2 gave up after \(rollbackCount) restarts")
+                        } else {
+                            cdCache.cacheLength = Int32(prefillLen)   // MLX trims on next forward
+                            frames.removeAll(keepingCapacity: true)
+                            hiddenHistory.removeAll(keepingCapacity: true)
+                            guardObs?.truncateGuardrailTrajectory(to: 0)
+                            bm.reset()
+                            rollbackCount += 1
+                            guardStats.rollbacks += 1
+                            guardStats.rewoundAudioSeconds += Double(stepIndex + 1) / 12.5
+                            sampler.reseed(UInt64(0xB1D1 &+ UInt64(rollbackCount) &* 2_654_435_761))
+                            // Fresh FIRST draw from the prefill logits — a binding
+                            // failure is decided by the opening tokens, so the
+                            // restart must not reuse the original code0.
+                            lastCdOutput = prefillResult.lastCdOutput
+                            code0 = await sampler.sampleCodec0(
+                                logits: lastCdOutput.logits,
+                                temperature: options.temperature, topK: options.topK,
+                                generatedTokens: [],
+                                repetitionPenalty: options.repetitionPenalty,
+                                suppressTokenIds: suppressTokenIds)
+                            generatedTokens = [code0]
+                            Logging.info("Guardrail v2 restart #\(rollbackCount): binding failure at step \(atStep)")
+                            stepIndex = 0
+                            continue
+                        }
+                    }
+                }
+
                 if let fire = guardStep(), executorActive, !executorGaveUp {
                     if rollbackCount >= (gConfig?.maxRetries ?? 10) || CFAbsoluteTimeGetCurrent() > rollbackDeadline {
                         // Budget exhausted: stop rolling back and keep decoding to the

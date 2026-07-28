@@ -43,6 +43,14 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// Head indices on ``biasLayer`` the bias is applied to.
     public var biasHeads: [Int]
 
+    /// Guardrails v2: replace the RD-655 coverage monitor with the
+    /// ``BindingMonitor`` (sustained flip-flop + text-mass collapse; validated
+    /// 100% recall / 0% FPR on clean unchunked trajectories) and replace
+    /// mid-stream rollback with full restart-from-prefill on a confirmed
+    /// binding failure. Unchunked generation only.
+    public var v2: Bool = false
+    public var binding = BindingMonitorConfig()
+
     // MARK: Model-agnostic detector + executor
 
     public var monitor = CoverageMonitorConfig()
