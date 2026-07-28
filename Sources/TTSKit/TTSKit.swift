@@ -937,7 +937,11 @@ open class TTSKit: @unchecked Sendable {
             cache = nil
         }
 
-        let effectiveStrategy = options.chunkingStrategy ?? .sentence
+        // UNCHUNKED-PRODUCTION BRANCH: synthesize the full text in one
+        // autoregressive pass (no TextChunker) — the regime the RD-655
+        // guardrails were designed and validated for. Sentence chunking remains
+        // available only as an explicit opt-in via options.chunkingStrategy.
+        let effectiveStrategy = options.chunkingStrategy ?? TextChunkingStrategy.none
         let textChunks: [String]
         if effectiveStrategy == .none || tokenizer == nil {
             textChunks = [text]

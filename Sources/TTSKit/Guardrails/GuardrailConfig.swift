@@ -87,26 +87,14 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// keys off frozen coverage, not dwell) intact. The pure
     /// `CoverageMonitorConfig` default stays 40 so RD-655 parity tests are
     /// unaffected; only the deployed guardrail presets carry the retune.
-    /// `maxRetries` is lowered from RD-655's 10 to **3** for the chunked
-    /// production path. Calibration on the RD-655 corpora through the chunked
-    /// pipeline showed the online detector's per-chunk precision is ~5% (the
-    /// chunked regime rarely exhibits coverage failures, and f(t) does not
-    /// separate the residual bad chunks), so most rollbacks are blind
-    /// resampling: the first retries carry that benefit, while retries 4–10
-    /// were pure thrash (51/99 eval samples hit the 10-retry cap, +40% mean
-    /// generation latency).
-    public static let default06bBase: GuardrailConfig = {
-        var c = GuardrailConfig(anchorLayer: 6, anchorHead: 0, biasLayer: 6, biasHeads: [0, 1])
-        c.monitor.fairInit = 15
-        c.maxRetries = 3
-        return c
-    }()
-    public static let default17bBase: GuardrailConfig = {
-        var c = GuardrailConfig(anchorLayer: 3, anchorHead: 0, biasLayer: 3, biasHeads: [0, 1])
-        c.monitor.fairInit = 15
-        c.maxRetries = 3
-        return c
-    }()
+    /// UNCHUNKED-PRODUCTION BRANCH: presets carry RD-655's NATIVE operating
+    /// point (fairInit 40, maxRetries 10) — the values rongxiang validated on
+    /// unchunked long-form generation, which is this branch's regime. The
+    /// chunked-production branch carries different overrides (fairInit 15,
+    /// maxRetries 3); do not cross-port them. Re-calibration on unchunked
+    /// voice-clone data may adjust these (and the anchor head) empirically.
+    public static let default06bBase = GuardrailConfig(anchorLayer: 6, anchorHead: 0, biasLayer: 6, biasHeads: [0, 1])
+    public static let default17bBase = GuardrailConfig(anchorLayer: 3, anchorHead: 0, biasLayer: 3, biasHeads: [0, 1])
 
     /// Pick the anchor preset for the loaded model. The layer count is the
     /// robust discriminator (0.6B talker has more layers than the 1.7B's

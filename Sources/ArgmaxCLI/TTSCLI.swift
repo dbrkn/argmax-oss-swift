@@ -61,8 +61,11 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Top-k sampling (0 to disable)")
     var topK: Int = 50
 
+    // Unchunked production: 245 frames (19.6 s) silently truncated any text
+    // longer than ~50 words mid-sentence. 8192 (~10.9 min) defers to the
+    // audio-token-ratio stop (8× text tokens), which is the principled cap.
     @Option(name: .long, help: "Max RVQ frames to generate")
-    var maxNewTokens: Int = 245
+    var maxNewTokens: Int = 8192
 
     @Option(name: .long, help: "Concurrent chunk workers (0=max, 1=sequential, N=batch size). Defaults to 1 with --play, 0 otherwise.")
     var concurrentWorkerCount: Int?
@@ -162,8 +165,12 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "CodeDecoder (talker) backend: coreml (default) | mlx — MLX talker with batched ICL prefill and no KV cap; macOS 14+, requires the Base-family mlx-community checkpoint in the local HF cache")
     var codeDecoderBackend: String = "coreml"
 
+    // Unchunked production: prefill (ICL text + reference frames) + up to 8×
+    // text-tokens of generation easily exceeds 1024 positions on real texts.
+    // The MLX cache grows dynamically, so this is a logical cap, not an
+    // allocation (~40 KB/position across layers at fp16).
     @Option(name: .long, help: "MLX talker KV budget in positions (prompt + generated frames)")
-    var mlxMaxSequenceLength: Int = 1024
+    var mlxMaxSequenceLength: Int = 16384
 
     // MARK: - Compute unit options
 
