@@ -94,6 +94,12 @@ public final class MlxVoiceCloneEncoder {
         }
 
         let (codes, frames) = encodeAudioCodes(waveform)
+        // Release the encode's Metal buffer pool before generation: MLX caches
+        // freed buffers, so a long-reference encode (~90 MB/s peak, ~19 GB at
+        // 210 s) otherwise stays resident through the talker loop and can OOM
+        // the process on 32–36 GB machines — especially with guardrail
+        // restarts re-decoding repeatedly.
+        GPU.clearCache()
         return VoiceClonePrompt(
             speakerEmbedding: speakerEmbedding,
             referenceCodes: codes,
