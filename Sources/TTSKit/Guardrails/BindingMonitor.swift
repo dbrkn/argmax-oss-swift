@@ -26,9 +26,16 @@ public struct BindingMonitorConfig: Codable, Sendable, Equatable {
     /// Each persistence window length; decision fires after two full windows.
     public var windowSteps: Int = 60
     /// Sign-alternation rate above which a window counts as flip-flopping.
-    public var alternationThreshold: Double = 0.65
+    /// CALIBRATION (RD-655 corpora texts × eval-disjoint speakers, 13 runs):
+    /// alternation does NOT separate — healthy long generations reach 0.75 —
+    /// so the default disables it (>1 never fires). Text-mass collapse is the
+    /// signal that generalizes: the catastrophic failure sat at 0.96 low-mass
+    /// fraction vs ≤0.71 for every healthy run → threshold 0.8. Partial
+    /// degradations (WER 0.4–0.6) are NOT separable from these signals — a
+    /// known limitation of the attention-side-only detector.
+    public var alternationThreshold: Double = 1.1
     /// Fraction of steps with textMass below `textMassFloor` that flags collapse.
-    public var textMassLowFraction: Double = 0.3
+    public var textMassLowFraction: Double = 0.8
     public var textMassFloor: Float = 0.3
     public init() {}
 }
