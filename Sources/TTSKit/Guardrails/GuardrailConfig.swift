@@ -48,8 +48,8 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// de-paused references). ACI presets resolve with the anchor preset.
     public var alignment: String = "soft"
     /// loc-ACI-deep: deepen every rollback by this many extra steps.
-    /// TODO(verify vs PR27 final): study value not in the fetched revision.
-    public var extraRollback: Int = 25
+    /// PR27 final ships 0 (plain rollback; prefill-DP carries the fix).
+    public var extraRollback: Int = 0
 
     /// Guardrails v2: replace the RD-655 coverage monitor with the
     /// ``BindingMonitor`` (sustained flip-flop + text-mass collapse; validated

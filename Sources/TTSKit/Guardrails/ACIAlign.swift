@@ -33,8 +33,8 @@ public struct ACIConfig: Sendable {
     /// Mask every step (pair with maxRetries=0) instead of arming on rollback.
     public var alwaysOn: Bool = false
     /// loc-ACI-deep mask-hold: armed window extends `window` steps past the fire.
-    /// TODO(verify vs PR27 final): study value not in the fetched revision.
-    public var window: Int = 40
+    /// PR27 final ships 0 (mask only through the rolled-back region; pDP carries the fix).
+    public var window: Int = 0
     /// Center from monotone DP ("dp") or raw argmax ("argmax").
     public var centerMode: String = "dp"
     /// Mask duty cycle: apply `applyN` of every `stride` armed steps ((1,1) = continuous, shipped loc-ACI).
