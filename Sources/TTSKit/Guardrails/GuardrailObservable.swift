@@ -40,6 +40,15 @@ public protocol GuardrailObservable: AnyObject {
     /// Disarm and clear the probe at end of generation.
     func endGuardrailObservation()
 
+    /// ACI (RD-691): attach the hard-CMask alignment with its ICL spans. The
+    /// decoder's attention advances the DP every decode step, applies the hard
+    /// windows when armed/always-on, and seeds the DP from the reference
+    /// codec frames during prefill (pDP). Default no-op.
+    func installGuardrailACI(_ aci: ACIAlign, iclTextStart: Int, iclTextEnd: Int,
+                             refCodecStart: Int, refCodecEnd: Int)
+    /// The attached ACI alignment (nil when not installed). Default nil.
+    var guardrailACI: ACIAlign? { get }
+
     /// Executor (Stage 2): set the soft-align bias for the next forward. While
     /// `active`, the decoder adds `−lambda·huber(|pos − center|; delta)` to the
     /// attention scores of `biasHeads` on `biasLayer` over the synthesis-text KV
@@ -59,6 +68,9 @@ extension GuardrailObservable {
     // Default no-op so observe-only decoders need not implement it.
     public func guardrailRollback(toDecodeStep decodeStep: Int) {}
     public var lastAnchorTextMass: Float? { nil }
+    public func installGuardrailACI(_ aci: ACIAlign, iclTextStart: Int, iclTextEnd: Int,
+                                    refCodecStart: Int, refCodecEnd: Int) {}
+    public var guardrailACI: ACIAlign? { nil }
     public func setGuardrailBias(active: Bool, center: Double, lambda: Double, delta: Double, biasLayer: Int, biasHeads: [Int]) {}
     public func guardrailDiagnostics() -> (globalArgmax: [Int], textMass: [Float], textStart: Int, textEnd: Int) {
         ([], [], -1, -1)

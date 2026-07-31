@@ -248,6 +248,22 @@ final class TalkerAttention {
             let b = bias.asType(q.dtype)
             effectiveMask = mask.map { $0 + b } ?? b
         }
+        // ACI hard-CMask (RD-691): per group layer, advance the monotone-DP
+        // centers every decode step and, when armed/always-on, clamp the
+        // configured heads to hard windows. During prefill, seed the DP from
+        // the reference codec frames' alignment rows (pDP).
+        if let probe, probe.aci != nil {
+            if seqLen == 1 {
+                if let cm = probe.aciDecodeMask(layer: layerIndex, q: q, cachedK: cachedK,
+                                                scale: pow(Float(headDim), -0.5), numHeads: numHeads) {
+                    let c = cm.asType(q.dtype)
+                    effectiveMask = effectiveMask.map { $0 + c } ?? c
+                }
+            } else {
+                probe.aciPrefillSeed(layer: layerIndex, q: q, cachedK: cachedK,
+                                     scale: pow(Float(headDim), -0.5), numHeads: numHeads)
+            }
+        }
 
         let out = MLXFast.scaledDotProductAttention(
             queries: q, keys: cachedK, values: cachedV,

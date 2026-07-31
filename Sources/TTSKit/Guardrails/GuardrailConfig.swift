@@ -43,6 +43,14 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// Head indices on ``biasLayer`` the bias is applied to.
     public var biasHeads: [Int]
 
+    /// Intervention alignment: "soft" = SoftAlign Huber bias (RD-655),
+    /// "aci" = RD-691 hard-CMask (monotone-DP windows + prefill-DP seeding +
+    /// de-paused references). ACI presets resolve with the anchor preset.
+    public var alignment: String = "soft"
+    /// loc-ACI-deep: deepen every rollback by this many extra steps.
+    /// TODO(verify vs PR27 final): study value not in the fetched revision.
+    public var extraRollback: Int = 25
+
     /// Guardrails v2: replace the RD-655 coverage monitor with the
     /// ``BindingMonitor`` (sustained flip-flop + text-mass collapse; validated
     /// 100% recall / 0% FPR on clean unchunked trajectories) and replace

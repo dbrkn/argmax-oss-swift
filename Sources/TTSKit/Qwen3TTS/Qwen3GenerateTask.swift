@@ -315,6 +315,22 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                         recordTrajectory: g.recordTrajectory)
                     Logging.info("Guardrails armed: anchor L\(g.anchorLayer)H\(g.anchorHead), "
                         + "text KV span [\(icl.mainTextRange.lowerBound),\(icl.mainTextRange.upperBound))")
+                    // ACI (RD-691): attach the hard-CMask alignment BEFORE the
+                    // prefill forward so the prefill pass seeds the monotone DP
+                    // from the reference codec frames (pDP). The DP domain is
+                    // the FULL ICL text (reference + main).
+                    if g.alignment == "aci" {
+                        let preset = g.anchorLayer == 3 ? ACIConfig.preset17b : ACIConfig.preset06b
+                        obs.installGuardrailACI(
+                            ACIAlign(config: preset),
+                            iclTextStart: icl.iclTextRange.lowerBound,
+                            iclTextEnd: icl.iclTextRange.upperBound,
+                            refCodecStart: icl.refCodecRange.lowerBound,
+                            refCodecEnd: icl.refCodecRange.upperBound)
+                        Logging.info("ACI installed: groups \(preset.groups), ICL text "
+                            + "[\(icl.iclTextRange.lowerBound),\(icl.iclTextRange.upperBound)), "
+                            + "ref frames [\(icl.refCodecRange.lowerBound),\(icl.refCodecRange.upperBound))")
+                    }
                 }
             } else {
                 combinedEmbeds = try await buildCombinedEmbeddings(
@@ -492,8 +508,11 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         var softAlignCfg = SoftAlignConfig()
         if let g = gConfig { softAlignCfg.lambda = g.lambda; softAlignCfg.delta = g.delta; softAlignCfg.stride = g.stride }
         let softAlign: SoftAlign? =
-            (executorActive && (gConfig?.lambda ?? 0) > 0)
+            (executorActive && (gConfig?.lambda ?? 0) > 0 && gConfig?.alignment != "aci")
             ? SoftAlign(config: softAlignCfg, biasHeads: gConfig!.biasHeads) : nil
+        // ACI (RD-691): installed on the decoder at prefill; the loop drives
+        // step position, per-step DP snapshots, and rollback restore/arming.
+        let aciAlign = guardObs?.guardrailACI
         // Absolute text-KV span (set on the probe at arm time in prefill).
         let guardSpan = guardObs?.guardrailDiagnostics()
         let biasTextStart = guardSpan?.textStart ?? -1
@@ -573,6 +592,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                         lambda: sa.lambda, delta: sa.delta,
                         biasLayer: gConfig!.biasLayer, biasHeads: gConfig!.biasHeads)
                 }
+                aciAlign?.setStep(stepIndex)   // ACI duty-cycle/armed-window position
 
                 let decodingStart = CFAbsoluteTimeGetCurrent()
                 lastCdOutput = try await codeDecoder.decode(inputEmbeds: combinedTensor, cache: cdCache, state: cdState)
@@ -583,6 +603,10 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 // monitor: a rollback to step k re-drives step k's multi-code decode
                 // from step (k−1)'s hidden, so the history must include this step.
                 if executorActive { hiddenHistory.append(lastCdOutput.hiddenStates) }
+                // ACI: snapshot the post-forward DP state so a rollback to step k
+                // can restore the track exactly as of step k−1 (python parity
+                // with the cache-length-keyed snapshots).
+                aciAlign?.snapshot(step: stepIndex)
 
                 // Guardrails v2: prompt-binding detection + restart-from-prefill.
                 // One decision at ~130 steps; a confirmed binding failure cannot
@@ -642,7 +666,9 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                         // was decoded but not yet committed (no frame appended, no next
                         // token sampled), so discarding steps [target, stepIndex] leaves
                         // no half-applied state.
-                        let target = max(0, min(fire.rollbackStep, stepIndex))
+                        // loc-ACI-deep: deepen the rollback by extraRollback steps.
+                        let deepen = aciAlign != nil ? (gConfig?.extraRollback ?? 0) : 0
+                        let target = max(0, min(fire.rollbackStep - deepen, stepIndex))
                         cdCache.cacheLength = Int32(prefillLen + target)   // MLX trims internal cache on next forward
                         if frames.count > target { frames.removeLast(frames.count - target) }
                         let resumeHidden: any EmbedTensorType =
@@ -666,6 +692,12 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                         // on-pace text position, forcing the stuck anchor forward
                         // (the recovery reseed alone can't achieve).
                         softAlign?.arm(skipStep: fire.fireStep)
+                        // ACI: restore the DP track to step target−1 and arm the
+                        // hard windows over the (window-extended) retry span.
+                        if let aci = aciAlign {
+                            aci.rollback(to: target - 1)
+                            aci.arm(skipStep: fire.fireStep)
+                        }
                         // Stochastic sampling (temp>0) — reseeding varies the retry so a
                         // deterministic stall is escaped. Deterministic per run.
                         sampler.reseed(UInt64(0xA5A5A5 &+ UInt64(rollbackCount) &* 2_654_435_761 &+ UInt64(target)))

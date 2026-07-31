@@ -5,6 +5,7 @@
 
 import Foundation
 import MLX
+import TTSKit
 
 /// Per-generation text-anchor observable for the MLX talker (RD-655 `f(t)`).
 ///
@@ -64,6 +65,86 @@ public final class AnchorProbe {
     /// argmax positions within the text span.
     public private(set) var scanSteps: [[Int32]] = []
     private var scanStepBuf: [Int: MLXArray] = [:]
+
+    // MARK: ACI hard-CMask (RD-691)
+    //
+    // When `aci` is attached, the forward calls ``aciDecodeMask`` on every
+    // group layer each decode step: the probe computes each configured head's
+    // text-region attention distribution (softmax over the full row, sliced to
+    // the ICL text span — python parity), hands it to the pure-Swift
+    // ``ACIAlign`` DP, and converts the returned hard band into the additive
+    // SDPA mask. During prefill, ``aciPrefillSeed`` captures the REFERENCE
+    // codec frames' rows and advances the DP (pDP) so the decode continues
+    // from the reference alignment.
+    public var aci: ACIAlign?
+    /// Full ICL text span (reference + main text) — the ACI DP domain.
+    public var aciTextStart: Int = -1
+    public var aciTextEnd: Int = -1
+    /// Reference codec-frame span (pDP rows).
+    public var refCodecStart: Int = -1
+    public var refCodecEnd: Int = -1
+
+    /// Decode-step ACI for one group layer. Returns the additive mask
+    /// `(numHeads, T)` flattened head-major, or nil when not masking this step.
+    func aciDecodeMask(layer: Int, q: MLXArray, cachedK: MLXArray, scale: Float, numHeads: Int) -> MLXArray? {
+        guard let aci, aci.layers.contains(layer), aciTextStart >= 0 else { return nil }
+        let t = cachedK.dim(2)
+        let tt = min(aciTextEnd, t)
+        guard tt > aciTextStart else { return nil }
+        let ntf = aciTextEnd - aciTextStart
+        let navail = tt - aciTextStart
+        let numKV = cachedK.dim(1)
+        let grp = numHeads / numKV
+        var segs: [Int: [Float]] = [:]
+        for h in aci.heads(for: layer) {
+            let qh = q[0, h, 0, 0...]
+            let kh = cachedK[0, h / grp]
+            let scores = (kh.matmul(qh) * scale)
+            let probs = softmax(scores, axis: -1)              // full row, then slice (parity)
+            segs[h] = probs[aciTextStart ..< tt].asArray(Float.self)
+        }
+        let apply = aci.shouldApply()
+        guard let bands = aci.layerCMask(layer: layer, segs: segs, pf: aciTextStart, tt: tt,
+                                         T: t, ntf: ntf, navail: navail, apply: apply),
+              apply, !bands.isEmpty else { return nil }
+        var flat = [Float](repeating: 0, count: numHeads * t)
+        for (h, band) in bands {
+            for i in 0..<t { flat[h * t + i] = band[i] }
+        }
+        return MLXArray(flat, [1, numHeads, 1, t])
+    }
+
+    /// Prefill pDP capture for one group layer: causal-masked full-row softmax
+    /// of the reference codec frames' rows, sliced to the ICL text span, fed
+    /// row-by-row into the DP.
+    func aciPrefillSeed(layer: Int, q: MLXArray, cachedK: MLXArray, scale: Float, numHeads: Int) {
+        guard let aci, aci.layers.contains(layer), refCodecStart >= 0, aciTextStart >= 0 else { return }
+        let t = cachedK.dim(2)
+        let rs = min(refCodecStart, t), re = min(refCodecEnd, t)
+        let tt = min(aciTextEnd, t)
+        guard re > rs, tt > aciTextStart else { return }
+        let ntf = aciTextEnd - aciTextStart
+        let numKV = cachedK.dim(1)
+        let grp = numHeads / numKV
+        // causal mask for the row block: row (absolute pos p) may attend cols <= p
+        let rows = MLXArray(Array(Int32(rs)..<Int32(re)), [re - rs, 1])
+        let cols = MLXArray(Array(Int32(0)..<Int32(t)), [1, t])
+        let causal = (cols .> rows).asType(.float32) * Float(-1e30)
+        for h in aci.heads(for: layer) {
+            let qh = q[0, h, rs..<re, 0...]                      // (R, hd)
+            let kh = cachedK[0, h / grp]                          // (T, hd)
+            let scores = qh.matmul(kh.transposed(1, 0)) * scale + causal   // (R, T)
+            let probs = softmax(scores, axis: -1)[0..., aciTextStart ..< tt]
+            let flat = probs.asArray(Float.self)                  // R × navail
+            let navail = tt - aciTextStart
+            var rowsArr: [[Float]] = []
+            rowsArr.reserveCapacity(re - rs)
+            for r in 0..<(re - rs) {
+                rowsArr.append(Array(flat[(r * navail)..<((r + 1) * navail)]))
+            }
+            aci.seedFromPrefill(layer: layer, head: h, rows: rowsArr, ntf: ntf)
+        }
+    }
 
     // MARK: Soft-align bias (RD-655 Stage-2 recovery)
     //

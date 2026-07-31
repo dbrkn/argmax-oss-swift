@@ -658,7 +658,8 @@ open class TTSKit: @unchecked Sendable {
     public func cloneVoice(
         referenceAudio: URL,
         referenceText: String? = nil,
-        xVectorOnly: Bool = false
+        xVectorOnly: Bool = false,
+        depauseReference: Bool = false
     ) async throws -> VoiceClonePrompt {
         guard xVectorOnly || referenceText != nil else {
             throw TTSError.invalidConfiguration(
@@ -671,9 +672,15 @@ open class TTSKit: @unchecked Sendable {
             throw TTSError.invalidConfiguration("Voice-clone encoder failed to initialize")
         }
 
-        let waveform = try AudioInput.loadMono(
+        var waveform = try AudioInput.loadMono(
             url: referenceAudio, sampleRate: Double(VoiceCloneEncoder.sampleRate)
         )
+        if depauseReference {
+            let before = Double(waveform.count) / Double(VoiceCloneEncoder.sampleRate)
+            waveform = AudioDepause.depause(waveform, sampleRate: VoiceCloneEncoder.sampleRate)
+            let after = Double(waveform.count) / Double(VoiceCloneEncoder.sampleRate)
+            Logging.info(String(format: "De-paused reference (RD-691): %.1fs -> %.1fs", before, after))
+        }
         let encoded = try await voiceCloneEncoder.encode(waveform, includeReferenceCodes: !xVectorOnly)
 
         // Re-wrap to attach the transcript: ICL prefix assembly needs it.

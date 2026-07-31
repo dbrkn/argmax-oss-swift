@@ -61,6 +61,9 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Top-k sampling (0 to disable)")
     var topK: Int = 50
 
+    @Option(name: .long, help: "Remove long pauses (>0.4s, 35dB below peak) from the voice-clone reference before encoding (RD-691). Implied by --guardrails aci.")
+    var depauseReference: Bool = false
+
     // Unchunked production: 245 frames (19.6 s) silently truncated any text
     // longer than ~50 words mid-sentence. 8192 (~10.9 min) defers to the
     // audio-token-ratio stop (8× text tokens), which is the principled cap.
@@ -366,10 +369,18 @@ struct TTSCLI: AsyncParsableCommand {
             let refURL = URL(fileURLWithPath: FileManager.resolveAbsolutePath(refAudio))
             if voiceCloneEncoderBackend == "mlx" {
                 #if canImport(TTSKitMLX)
-                let waveform = try AudioInput.loadMono(
+                var waveform = try AudioInput.loadMono(
                     url: refURL,
                     sampleRate: Double(MlxVoiceCloneEncoder.sampleRate)
                 )
+                if depauseReference || guardrails == "aci" {
+                    // RD-691: long reference pauses destabilize the prefill
+                    // ref-audio↔ref-text alignment; the ACI arm always de-pauses.
+                    let before = Double(waveform.count) / Double(MlxVoiceCloneEncoder.sampleRate)
+                    waveform = AudioDepause.depause(waveform, sampleRate: MlxVoiceCloneEncoder.sampleRate)
+                    print(String(format: "De-paused reference: %.1fs -> %.1fs",
+                                 before, Double(waveform.count) / Double(MlxVoiceCloneEncoder.sampleRate)))
+                }
                 let encoder = try MlxVoiceCloneEncoder(
                     modelDirectory: mlxModelDir.map { URL(fileURLWithPath: FileManager.resolveAbsolutePath($0)) },
                     maxReferenceSeconds: maxReferenceSeconds
@@ -401,6 +412,7 @@ struct TTSCLI: AsyncParsableCommand {
             g.enabled = true
             g.observeOnly = (guardrails == "observe")
             g.v2 = (guardrails == "v2")
+            if guardrails == "aci" { g.alignment = "aci" }   // RD-691 hard-CMask + pDP
             g.recordTrajectory = true
             guardrailConfig = g
         }

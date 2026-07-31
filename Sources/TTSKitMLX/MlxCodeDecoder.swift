@@ -202,6 +202,17 @@ public final class MlxCodeDecoder: CodeDecoding, BatchPrefillCapable, GuardrailO
         p.biasLayer = biasLayer
         p.biasHeads = Set(biasHeads)
     }
+    public func installGuardrailACI(_ aci: ACIAlign, iclTextStart: Int, iclTextEnd: Int,
+                                    refCodecStart: Int, refCodecEnd: Int) {
+        guard let p = anchorProbe else { return }
+        p.aci = aci
+        p.aciTextStart = iclTextStart
+        p.aciTextEnd = iclTextEnd
+        p.refCodecStart = refCodecStart
+        p.refCodecEnd = refCodecEnd
+    }
+    public var guardrailACI: ACIAlign? { anchorProbe?.aci }
+
     public func endGuardrailObservation() {
         // Head scan: append this generation's all-layer/all-head argmax
         // trajectory as one JSONL line (chunked generation → one line per chunk).

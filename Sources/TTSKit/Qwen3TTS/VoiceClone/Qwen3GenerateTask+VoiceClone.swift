@@ -30,7 +30,8 @@ extension Qwen3GenerateTask {
         instruction: String?,
         textTokenIds: [Int32],
         embedDim: Int
-    ) async throws -> (embeds: [[FloatType]], mainTextRange: Range<Int>) {
+    ) async throws -> (embeds: [[FloatType]], mainTextRange: Range<Int>,
+                       iclTextRange: Range<Int>, refCodecRange: Range<Int>) {
         guard let referenceCodes = prompt.referenceCodes, prompt.referenceCodeFrames > 0 else {
             throw TTSError.invalidConfiguration("ICL voice clone requires reference RVQ codes")
         }
@@ -100,6 +101,7 @@ extension Qwen3GenerateTask {
         // the coverage region the guardrail anchor tracks. It sits after the
         // control block + the reference transcript, before the trailing EOS.
         let refTextCount = iclTokenIds.count - textTokenIds.count
+        let iclTextStart = textTrack.count            // first REF-text position (ACI DP span start)
         let mainTextStart = textTrack.count + refTextCount
         let mainTextEnd = mainTextStart + textTokenIds.count
 
@@ -107,6 +109,7 @@ extension Qwen3GenerateTask {
         codecTrack.append(contentsOf: Array(repeating: codecPadEmbed, count: iclTextEmbeds.count))
 
         // Codec: BOS + one summed embedding per reference RVQ frame, under text PAD.
+        let refCodecStart = textTrack.count + 1       // first REF frame position (after codec BOS; pDP rows)
         var iclCodecEmbeds: [[FloatType]] = []
         try await iclCodecEmbeds.append(codeEmbedder.embed(tokenId: Qwen3TTSConstants.codecBOS))
         let frames = prompt.referenceCodeFrames
@@ -142,7 +145,8 @@ extension Qwen3GenerateTask {
         }
 
         let embeds = zip(textTrack, codecTrack).map { EmbedUtilities.addEmbeddings($0.0, $0.1) }
-        return (embeds, mainTextStart..<mainTextEnd)
+        return (embeds, mainTextStart..<mainTextEnd,
+                iclTextStart..<mainTextEnd, refCodecStart..<(refCodecStart + frames))
     }
 
     /// Embedding of one 16-code RVQ frame: `codeEmbedder(code₀) + Σᵢ
