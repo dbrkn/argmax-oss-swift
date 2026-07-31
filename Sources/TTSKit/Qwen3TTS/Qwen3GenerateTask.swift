@@ -513,6 +513,16 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         // ACI (RD-691): installed on the decoder at prefill; the loop drives
         // step position, per-step DP snapshots, and rollback restore/arming.
         let aciAlign = guardObs?.guardrailACI
+        if let aci = aciAlign {
+            // pDP verification: centers should sit near the end of the REF text
+            // (≈ ref-token count) after prefill seeding — near 0 means the
+            // prefill trajectory did not advance and the mask would misplace.
+            let c = aci.centers().map { "L\($0.layer)H\($0.head)=\($0.center)" }.joined(separator: " ")
+            Logging.info("ACI pDP centers after prefill: \(c)")
+            // The post-pDP state is the rollback floor: a rollback to step 0
+            // must restore the prefill-seeded track, not wipe it.
+            aci.markBaseline()
+        }
         // Absolute text-KV span (set on the probe at arm time in prefill).
         let guardSpan = guardObs?.guardrailDiagnostics()
         let biasTextStart = guardSpan?.textStart ?? -1

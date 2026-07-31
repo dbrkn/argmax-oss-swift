@@ -225,6 +225,19 @@ final class TalkerAttention {
 
         let (cachedK, cachedV) = cache.update(keys: k, values: v)
 
+        // ACI hard-CMask (RD-691): advance the monotone-DP centers and build
+        // this layer's mask BEFORE the observe readout, so the anchor-head
+        // band is fresh for the post-mask f read below.
+        var aciMask: MLXArray?
+        if let probe, probe.aci != nil {
+            if seqLen == 1 {
+                aciMask = probe.aciDecodeMask(layer: layerIndex, q: q, cachedK: cachedK,
+                                              scale: pow(Float(headDim), -0.5), numHeads: numHeads)
+            } else {
+                probe.aciPrefillSeed(layer: layerIndex, q: q, cachedK: cachedK,
+                                     scale: pow(Float(headDim), -0.5), numHeads: numHeads)
+            }
+        }
         // Observe-only text-anchor readout on the anchor layer during decode.
         // A separate score computation; the SDPA output below is unchanged.
         if let probe, seqLen == 1, layerIndex == probe.anchorLayer {
@@ -248,21 +261,11 @@ final class TalkerAttention {
             let b = bias.asType(q.dtype)
             effectiveMask = mask.map { $0 + b } ?? b
         }
-        // ACI hard-CMask (RD-691): per group layer, advance the monotone-DP
-        // centers every decode step and, when armed/always-on, clamp the
-        // configured heads to hard windows. During prefill, seed the DP from
-        // the reference codec frames' alignment rows (pDP).
-        if let probe, probe.aci != nil {
-            if seqLen == 1 {
-                if let cm = probe.aciDecodeMask(layer: layerIndex, q: q, cachedK: cachedK,
-                                                scale: pow(Float(headDim), -0.5), numHeads: numHeads) {
-                    let c = cm.asType(q.dtype)
-                    effectiveMask = effectiveMask.map { $0 + c } ?? c
-                }
-            } else {
-                probe.aciPrefillSeed(layer: layerIndex, q: q, cachedK: cachedK,
-                                     scale: pow(Float(headDim), -0.5), numHeads: numHeads)
-            }
+        // ACI hard-CMask (RD-691): apply this layer's band (built above,
+        // before the observe readout) to the SDPA mask.
+        if let cm = aciMask {
+            let c = cm.asType(q.dtype)
+            effectiveMask = effectiveMask.map { $0 + c } ?? c
         }
 
         let out = MLXFast.scaledDotProductAttention(

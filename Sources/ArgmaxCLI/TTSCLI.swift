@@ -61,7 +61,7 @@ struct TTSCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Top-k sampling (0 to disable)")
     var topK: Int = 50
 
-    @Option(name: .long, help: "Remove long pauses (>0.4s, 35dB below peak) from the voice-clone reference before encoding (RD-691). Implied by --guardrails aci.")
+    @Flag(name: .long, help: "Remove long pauses (>0.4s, 35dB below peak) from the voice-clone reference before encoding (RD-691). Implied by --guardrails aci.")
     var depauseReference: Bool = false
 
     // Unchunked production: 245 frames (19.6 s) silently truncated any text

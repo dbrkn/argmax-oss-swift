@@ -68,6 +68,10 @@ public final class ACIAlign {
     private var ctr: [Int: Int] = [:]
     /// Rollback snapshots keyed by decode step: step -> (dp, ctr) copies.
     private var snaps: [Int: ([Int: [Float]], [Int: Int])] = [:]
+    /// The post-pDP state (end of prefill) — the floor every rollback restores
+    /// to when no per-step snapshot applies. Without this, a rollback to step 0
+    /// wipes the prefill seeding and the windows collapse onto a garbage center.
+    private var baseline: ([Int: [Float]], [Int: Int])?
 
     public init(config: ACIConfig) { self.cfg = config }
 
@@ -101,9 +105,19 @@ public final class ACIAlign {
         if snaps.count > 1700, let oldest = snaps.keys.min() { snaps.removeValue(forKey: oldest) }
     }
 
+    /// Freeze the current (post-pDP) state as the rollback floor. Call once
+    /// after prefill, before the first decode step.
+    public func markBaseline() { baseline = (dp, ctr) }
+
     public func rollback(to step: Int) {
         for k in snaps.keys where k > step { snaps.removeValue(forKey: k) }
-        if let s = snaps[step] { dp = s.0; ctr = s.1 } else { dp.removeAll(); ctr.removeAll() }
+        if let s = snaps[step] {
+            dp = s.0; ctr = s.1
+        } else if let b = baseline {
+            dp = b.0; ctr = b.1
+        } else {
+            dp.removeAll(); ctr.removeAll()
+        }
     }
 
     /// Advance one head's monotone DP with this step's text-region attention
@@ -166,6 +180,11 @@ public final class ACIAlign {
             }
         }
         return out
+    }
+
+    /// Current DP centers per (layer, head) — pDP verification/telemetry.
+    public func centers() -> [(layer: Int, head: Int, center: Int)] {
+        ctr.map { (($0.key / 1000), ($0.key % 1000), $0.value) }.sorted { ($0.0, $0.1) < ($1.0, $1.1) }
     }
 
     /// prefill DP (pDP, RD-691): advance a head's DP over the REFERENCE codec

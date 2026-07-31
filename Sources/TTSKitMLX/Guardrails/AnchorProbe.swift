@@ -84,6 +84,10 @@ public final class AnchorProbe {
     public var refCodecStart: Int = -1
     public var refCodecEnd: Int = -1
 
+    /// The anchor head's band from the last masked step (python parity: the
+    /// monitor's f is read POST-CMask, so it judges the corrected trajectory).
+    private var lastAnchorBand: [Float]?
+
     /// Decode-step ACI for one group layer. Returns the additive mask
     /// `(numHeads, T)` flattened head-major, or nil when not masking this step.
     func aciDecodeMask(layer: Int, q: MLXArray, cachedK: MLXArray, scale: Float, numHeads: Int) -> MLXArray? {
@@ -104,9 +108,15 @@ public final class AnchorProbe {
             segs[h] = probs[aciTextStart ..< tt].asArray(Float.self)
         }
         let apply = aci.shouldApply()
-        guard let bands = aci.layerCMask(layer: layer, segs: segs, pf: aciTextStart, tt: tt,
-                                         T: t, ntf: ntf, navail: navail, apply: apply),
-              apply, !bands.isEmpty else { return nil }
+        let bands = aci.layerCMask(layer: layer, segs: segs, pf: aciTextStart, tt: tt,
+                                   T: t, ntf: ntf, navail: navail, apply: apply)
+        // Python parity: the monitor's f is read POST-CMask on the anchor head,
+        // so it judges the corrected trajectory (else it never sees the mask
+        // working and keeps re-firing).
+        if layer == anchorLayer {
+            lastAnchorBand = apply ? bands?[anchorHead] : nil
+        }
+        guard apply, let bands, !bands.isEmpty else { return nil }
         var flat = [Float](repeating: 0, count: numHeads * t)
         for (h, band) in bands {
             for i in 0..<t { flat[h * t + i] = band[i] }
@@ -274,6 +284,11 @@ public final class AnchorProbe {
                 pen[pos] = Float(-biasLambda * huber)
             }
             scores = scores + MLXArray(pen, [t])
+        }
+        // ACI post-mask read: apply the anchor head's hard band from this
+        // step's CMask so the monitor judges the corrected trajectory.
+        if let band = lastAnchorBand, band.count == t {
+            scores = scores + MLXArray(band, [t])
         }
         let seg = scores[textStart ..< end]
         let am = textStart + argMax(seg).item(Int.self)     // absolute attended text position
