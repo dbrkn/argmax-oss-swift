@@ -747,6 +747,19 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 stepIndex += 1
                 progress.completedUnitCount = Int64(stepIndex)
 
+                // Coverage-complete EOS-promotion (RD-655, PR27 2f800c9): the
+                // final text bin has held its fair dwell for `eosGrace` steps
+                // and the model keeps running — force the EOS path. Never in
+                // observe-only (Stage-1 must not alter generation).
+                if gConfig?.eosPromote == true, executorActive, !executorGaveUp,
+                   let mon = guardMonitor, let done = mon.coverageDoneStep,
+                   (mon.nSteps - 1 - done) >= (gConfig?.eosGrace ?? 12) {
+                    guardStats.eosPromoted = true
+                    Logging.info("Guardrail EOS-promotion: coverage complete at step \(done), "
+                        + "forcing EOS at step \(stepIndex)")
+                    break
+                }
+
                 if stepIndex == 1 || stepIndex % 10 == 0 {
                     let stepMs = (CFAbsoluteTimeGetCurrent() - stepStart) * 1000
                     Logging.debug(

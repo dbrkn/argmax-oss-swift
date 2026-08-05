@@ -45,6 +45,9 @@ public struct GuardrailStats: Sendable, Equatable {
     public var meanObserveMs = 0.0
     /// Hit `maxRetries` or `maxRollbackSeconds` and returned the un-fixed decode.
     public var gaveUp = false
+    /// EOS was forced by coverage-complete promotion (RD-655 `eosPromote`) —
+    /// the model had spoken the full text but did not terminate on its own.
+    public var eosPromoted = false
     /// Anchor coordinate actually used (for the run record; model-specific).
     public var anchor: [Int] = []
     /// Optional full `f(t)` trajectory (only when `recordTrajectory`).

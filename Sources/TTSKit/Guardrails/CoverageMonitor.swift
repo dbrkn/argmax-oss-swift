@@ -32,6 +32,9 @@ public struct CoverageMonitorConfig: Codable, Sendable, Equatable {
     /// Cap on rollback depth in steps (≈128 s at 12.5 Hz).
     public var maxRollback: Int = 1600
     public var adaptive: Bool = true
+    /// EOS-promotion (RD-655): the FINAL bin's dwell must reach
+    /// `eosKappa · fair` to latch coverage-complete (1.0 = a full fair share).
+    public var eosKappa: Double = 1.0
 
     public init() {}
 }
@@ -67,6 +70,11 @@ public final class CoverageMonitor {
     private var maxCommitted = -1
     private var hwStep = 0
     private var t = -1
+    /// First step the FINAL text bin reached `eosKappa·fair` dwell — i.e. the
+    /// text is fully spoken; `nil` until then. Rewinds with `rollback(to:)`
+    /// (recomputed on replay). The decoder forces EOS `eosGrace` steps after
+    /// this if the model has not terminated on its own (RD-655 EOS-promotion).
+    public private(set) var coverageDoneStep: Int?
 
     public init(ntok: Int, config: CoverageMonitorConfig = CoverageMonitorConfig()) {
         self.cfg = config
@@ -110,6 +118,7 @@ public final class CoverageMonitor {
         maxCommitted = -1
         hwStep = 0
         t = -1
+        coverageDoneStep = nil
     }
 
     private func update(_ fT: Float) -> GuardrailFailure? {
@@ -142,6 +151,14 @@ public final class CoverageMonitor {
         let advanced = settleTo > settledBin
         settledBin = max(settledBin, settleTo)
         if advanced || settledBin == 0 { hwStep = t }
+
+        // --- COVERAGE COMPLETE (RD-655 EOS-promotion): the final bin has
+        // reached its fair share of dwell — the text is fully spoken. Latched
+        // once; recomputed on rollback via replay. The decoder forces EOS
+        // `eosGrace` steps later if the model keeps running.
+        if coverageDoneStep == nil, count[nb - 1] >= cfg.eosKappa * fairCount {
+            coverageDoneStep = t
+        }
 
         // --- SKIP: a locked-skipped bin sits behind the committed frontier ---
         var committedFrontier = maxCommitted

@@ -412,7 +412,10 @@ struct TTSCLI: AsyncParsableCommand {
             g.enabled = true
             g.observeOnly = (guardrails == "observe")
             g.v2 = (guardrails == "v2")
-            if guardrails == "aci" { g.alignment = "aci" }   // RD-691 hard-CMask + pDP
+            if guardrails == "aci" {
+                g.alignment = "aci"          // RD-691 hard-CMask + pDP
+                g.eosPromote = true          // RD-655 coverage-complete EOS-force (PR27 2f800c9)
+            }
             g.recordTrajectory = true
             guardrailConfig = g
         }

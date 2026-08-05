@@ -50,6 +50,16 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// loc-ACI-deep: deepen every rollback by this many extra steps.
     /// PR27 final ships 0 (plain rollback; prefill-DP carries the fix).
     public var extraRollback: Int = 0
+    /// Coverage-complete EOS-force (RD-655 extension to loc-ACI): once the
+    /// coverage monitor's FINAL text bin reaches its fair dwell, force EOS
+    /// `eosGrace` steps later if the model has not terminated on its own —
+    /// stops non-terminating (trailing-hallucination) runaways. Off by
+    /// default; the CLI enables it for `--guardrails aci`.
+    public var eosPromote: Bool = false
+    /// Steps after coverage-complete before forcing EOS (~1 s @ 12.5 Hz):
+    /// long enough to finish the last word, short enough to stop before
+    /// trailing hallucination.
+    public var eosGrace: Int = 12
 
     /// Guardrails v2: replace the RD-655 coverage monitor with the
     /// ``BindingMonitor`` (sustained flip-flop + text-mass collapse; validated
