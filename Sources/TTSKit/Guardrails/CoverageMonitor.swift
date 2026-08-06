@@ -87,6 +87,10 @@ public final class CoverageMonitor {
     /// Number of steps currently held = the live decode position.
     public var nSteps: Int { fHist.count }
 
+    /// Fraction of text bins committed as covered — the end-of-chunk
+    /// acceptance signal (a never-bound decode stays ≈ 0).
+    public var committedFraction: Double { Double(max(0, maxCommitted + 1)) / Double(nBins) }
+
     /// The `f(t)` history so far (rewound by `rollback(to:)`); the soft-align
     /// pace integrator reads this to track the on-pace text position.
     public var fHistory: [Float] { fHist }

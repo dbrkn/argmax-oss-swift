@@ -56,6 +56,19 @@ public struct GuardrailConfig: Codable, Sendable, Equatable {
     /// stops non-terminating (trailing-hallucination) runaways. Off by
     /// default; the CLI enables it for `--guardrails aci`.
     public var eosPromote: Bool = false
+    /// Never-bound rescue (streaming-safe: acts only on unreleased audio).
+    /// Runs the v2 BindingMonitor alongside the coverage monitor in the aci
+    /// arm; a binding fire restarts the CHUNK from the prefill with a fresh
+    /// seed (rollback cannot fix a decode whose entire prefix is garbage).
+    public var bindingRescue: Bool = true
+    /// Whole-chunk restart budget (binding fires + rejected acceptance),
+    /// separate from the located-rollback budget `maxRetries`.
+    public var maxRestarts: Int = 2
+    /// End-of-chunk acceptance: the chunk is rejected (and restarted) when
+    /// BOTH the committed-coverage fraction and the anchor high-water are
+    /// below these floors — the never-bound signature at chunk end.
+    public var acceptMinCoverage: Double = 0.5
+    public var acceptMinHighWater: Float = 0.8
     /// Steps after coverage-complete before forcing EOS (~1 s @ 12.5 Hz):
     /// long enough to finish the last word, short enough to stop before
     /// trailing hallucination.

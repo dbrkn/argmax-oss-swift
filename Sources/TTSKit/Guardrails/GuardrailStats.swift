@@ -48,6 +48,14 @@ public struct GuardrailStats: Sendable, Equatable {
     /// EOS was forced by coverage-complete promotion (RD-655 `eosPromote`) —
     /// the model had spoken the full text but did not terminate on its own.
     public var eosPromoted = false
+    /// Whole-chunk restarts executed (binding fires + rejected acceptance).
+    public var restarts = 0
+    /// One entry per restart: "reason@step#attempt" (e.g. "binding@190#1").
+    public var restartLog: [String] = []
+    /// End-of-chunk acceptance record (aci + bindingRescue only).
+    public var acceptCoverage = 1.0
+    public var acceptHighWater: Float = 1
+    public var acceptAccepted = true
     /// Anchor coordinate actually used (for the run record; model-specific).
     public var anchor: [Int] = []
     /// Optional full `f(t)` trajectory (only when `recordTrajectory`).

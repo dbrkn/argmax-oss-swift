@@ -461,8 +461,14 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         let isV2 = gConfig?.v2 == true
         let guardMonitor: CoverageMonitor? = (guardObs == nil || isV2) ? nil
             : CoverageMonitor(ntok: max(1, tokenizeResult.textTokenIds.count), config: gConfig!.monitor)
+        // v2 uses it as the SOLE detector; the aci arm (bindingRescue) runs it
+        // ALONGSIDE the coverage monitor as a never-bound tripwire whose fire
+        // restarts the chunk from prefill (rollback cannot fix an all-garbage
+        // prefix; a fresh first draw demonstrably can).
+        let aciRescue = !isV2 && gConfig?.alignment == "aci"
+            && gConfig?.observeOnly == false && gConfig?.bindingRescue == true
         let bindingMonitor: BindingMonitor? =
-            (guardObs != nil && isV2) ? BindingMonitor(config: gConfig!.binding) : nil
+            (guardObs != nil && (isV2 || aciRescue)) ? BindingMonitor(config: gConfig!.binding) : nil
         var guardStats = GuardrailStats()
         if let g = gConfig, guardObs != nil {
             guardStats.active = true
@@ -501,6 +507,11 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         var executorGaveUp = false
         let rollbackDeadline = CFAbsoluteTimeGetCurrent() + (gConfig?.maxRollbackSeconds ?? 120)
         if executorActive { frames.reserveCapacity(options.maxNewTokens) }
+        // Whole-chunk restarts (binding fire / rejected acceptance) have their
+        // own budget; a restart is a FRESH attempt, so it also refunds the
+        // located-rollback budget and clears gaveUp.
+        var restartCount = 0
+        let restartBudget = isV2 ? (gConfig?.maxRetries ?? 10) : (gConfig?.maxRestarts ?? 2)
 
         // Soft-align recovery bias (RD-655 Stage-2). Armed on a rollback; while
         // armed it nudges the bias heads onto the on-pace text position over the
@@ -527,6 +538,42 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         let guardSpan = guardObs?.guardrailDiagnostics()
         let biasTextStart = guardSpan?.textStart ?? -1
         let biasTextEnd = guardSpan?.textEnd ?? -1
+
+        // Whole-chunk restart: reset every rewindable structure back to the
+        // prefill state (the caller then resamples code0 and continues the
+        // loop from step 0). Shared by the v2 binding path, the aci binding
+        // tripwire, and the end-of-chunk acceptance rejections.
+        func resetForRestart(reason: String, atStep: Int) {
+            cdCache.cacheLength = Int32(prefillLen)   // MLX trims on next forward
+            frames.removeAll(keepingCapacity: true)
+            hiddenHistory.removeAll(keepingCapacity: true)
+            guardObs?.truncateGuardrailTrajectory(to: 0)
+            bindingMonitor?.reset()
+            guardMonitor?.rollback(to: 0)
+            if let aci = aciAlign { aci.rollback(to: -1) }   // pDP baseline
+            restartCount += 1
+            rollbackCount = 0                          // fresh attempt: refund
+            executorGaveUp = false
+            guardStats.restarts += 1
+            guardStats.restartLog.append("\(reason)@\(atStep)#\(restartCount)")
+            guardStats.rewoundAudioSeconds += Double(atStep + 1) / 12.5
+            sampler.reseed(UInt64(0xB1D1 &+ UInt64(restartCount) &* 2_654_435_761))
+            Logging.info("Guardrail chunk restart #\(restartCount) (\(reason)) at step \(atStep)")
+        }
+        // End-of-chunk acceptance (aci rescue): the chunk is rejected when
+        // BOTH coverage and the anchor high-water carry the never-bound
+        // signature. Records the verdict either way.
+        func chunkAccepted() -> Bool {
+            guard aciRescue, let mon = guardMonitor else { return true }
+            let frac = mon.committedFraction
+            let hw = mon.fHistory.max() ?? 0
+            let ok = frac >= (gConfig?.acceptMinCoverage ?? 0.5)
+                || hw >= (gConfig?.acceptMinHighWater ?? 0.8)
+            guardStats.acceptCoverage = frac
+            guardStats.acceptHighWater = hw
+            guardStats.acceptAccepted = ok
+            return ok
+        }
 
         // TODO: Remove forking logic with package with min os version upgrade
         if #available(macOS 15.0, iOS 18.0, watchOS 11.0, visionOS 2.0, *), !options.forceLegacyEmbedPath {
@@ -628,23 +675,18 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                         guardStats.record(GuardrailFailure(
                             failure: .hallucination, fireStep: atStep, rollbackStep: 0,
                             bins: [], fairCount: 0, nBins: 0))
-                        if !executorActive || executorGaveUp {
+                        // NOTE: a binding fire proceeds even after rollback
+                        // gave up — the restart is precisely the escape from
+                        // an exhausted-rollback never-bound decode.
+                        if !executorActive {
                             // observe mode: verdict recorded, generation untouched
-                        } else if rollbackCount >= (gConfig?.maxRetries ?? 10)
+                        } else if restartCount >= restartBudget
                             || CFAbsoluteTimeGetCurrent() > rollbackDeadline {
                             executorGaveUp = true
                             guardStats.gaveUp = true
-                            Logging.info("Guardrail v2 gave up after \(rollbackCount) restarts")
+                            Logging.info("Guardrail gave up after \(restartCount) restarts (binding)")
                         } else {
-                            cdCache.cacheLength = Int32(prefillLen)   // MLX trims on next forward
-                            frames.removeAll(keepingCapacity: true)
-                            hiddenHistory.removeAll(keepingCapacity: true)
-                            guardObs?.truncateGuardrailTrajectory(to: 0)
-                            bm.reset()
-                            rollbackCount += 1
-                            guardStats.rollbacks += 1
-                            guardStats.rewoundAudioSeconds += Double(stepIndex + 1) / 12.5
-                            sampler.reseed(UInt64(0xB1D1 &+ UInt64(rollbackCount) &* 2_654_435_761))
+                            resetForRestart(reason: "binding", atStep: stepIndex)
                             // Fresh FIRST draw from the prefill logits — a binding
                             // failure is decided by the opening tokens, so the
                             // restart must not reuse the original code0.
@@ -656,7 +698,6 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                                 repetitionPenalty: options.repetitionPenalty,
                                 suppressTokenIds: suppressTokenIds)
                             generatedTokens = [code0]
-                            Logging.info("Guardrail v2 restart #\(rollbackCount): binding failure at step \(atStep)")
                             stepIndex = 0
                             continue
                         }
@@ -733,6 +774,27 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 generatedTokens.append(code0)
                 timings.decodingSampling += CFAbsoluteTimeGetCurrent() - samplingStart
 
+                // End-of-chunk acceptance at natural EOS (aci rescue): a chunk
+                // ending with the never-bound signature is rejected BEFORE any
+                // audio is released — restart from prefill with a fresh seed.
+                if code0 == Qwen3TTSConstants.codecEOS, executorActive, aciRescue, !chunkAccepted() {
+                    if restartCount < restartBudget, CFAbsoluteTimeGetCurrent() < rollbackDeadline {
+                        resetForRestart(reason: "acceptance-eos", atStep: stepIndex)
+                        lastCdOutput = prefillResult.lastCdOutput
+                        code0 = await sampler.sampleCodec0(
+                            logits: lastCdOutput.logits,
+                            temperature: options.temperature, topK: options.topK,
+                            generatedTokens: [],
+                            repetitionPenalty: options.repetitionPenalty,
+                            suppressTokenIds: suppressTokenIds)
+                        generatedTokens = [code0]
+                        stepIndex = 0
+                        continue
+                    }
+                    guardStats.gaveUp = true
+                    Logging.info("Chunk acceptance rejected at EOS but restart budget exhausted; shipping as-is")
+                }
+
                 // Full mode (executor) accumulates frames for a single post-loop
                 // vocode pass; observe/off mode streams through the writer as before
                 // (unchanged, bit-identical audio — the Stage-1 fidelity invariant).
@@ -750,14 +812,39 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 // Coverage-complete EOS-promotion (RD-655, PR27 2f800c9): the
                 // final text bin has held its fair dwell for `eosGrace` steps
                 // and the model keeps running — force the EOS path. Never in
-                // observe-only (Stage-1 must not alter generation).
-                if gConfig?.eosPromote == true, executorActive, !executorGaveUp,
+                // observe-only (Stage-1 must not alter generation). Python
+                // parity: applies even after rollback gave up (the terminal
+                // stall is exactly when the budget tends to be exhausted).
+                if gConfig?.eosPromote == true, executorActive,
                    let mon = guardMonitor, let done = mon.coverageDoneStep,
                    (mon.nSteps - 1 - done) >= (gConfig?.eosGrace ?? 12) {
                     guardStats.eosPromoted = true
                     Logging.info("Guardrail EOS-promotion: coverage complete at step \(done), "
                         + "forcing EOS at step \(stepIndex)")
                     break
+                }
+
+                // End-of-chunk acceptance at the step caps (aci rescue): the
+                // loop is about to exit on a cap — the runaway signature. If
+                // the chunk never bound, restart instead of shipping babble.
+                if executorActive, aciRescue,
+                   stepIndex >= min(options.maxNewTokens, maxStepsByPrefill) || cdCache.isFull,
+                   !chunkAccepted() {
+                    if restartCount < restartBudget, CFAbsoluteTimeGetCurrent() < rollbackDeadline {
+                        resetForRestart(reason: "acceptance-cap", atStep: stepIndex)
+                        lastCdOutput = prefillResult.lastCdOutput
+                        code0 = await sampler.sampleCodec0(
+                            logits: lastCdOutput.logits,
+                            temperature: options.temperature, topK: options.topK,
+                            generatedTokens: [],
+                            repetitionPenalty: options.repetitionPenalty,
+                            suppressTokenIds: suppressTokenIds)
+                        generatedTokens = [code0]
+                        stepIndex = 0
+                        continue
+                    }
+                    guardStats.gaveUp = true
+                    Logging.info("Chunk acceptance rejected at cap but restart budget exhausted; shipping as-is")
                 }
 
                 if stepIndex == 1 || stepIndex % 10 == 0 {
@@ -916,6 +1003,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                 let escapedText = (try? String(
                     data: JSONSerialization.data(withJSONObject: [chunkText]), encoding: .utf8))
                     .map { String($0.dropFirst().dropLast()) } ?? "\"\""
+                let restartLogStr = guardStats.restartLog.map { "\"\($0)\"" }.joined(separator: ",")
                 let json = "{\"anchor\":[\(gConfig!.anchorLayer),\(gConfig!.anchorHead)],"
                     + "\"text\":\(escapedText),"
                     + "\"ntok\":\(tokenizeResult.textTokenIds.count),\"steps\":\(stepIndex),"
@@ -923,6 +1011,11 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
                     + "\"fires\":[\(fires)],\"f\":[\(fstr)],"
                     + "\"rollbacks\":\(guardStats.rollbacks),\"gaveUp\":\(guardStats.gaveUp),"
                     + "\"rewoundAudioSeconds\":\(guardStats.rewoundAudioSeconds),"
+                    + "\"restarts\":\(guardStats.restarts),\"restartLog\":[\(restartLogStr)],"
+                    + "\"eosPromoted\":\(guardStats.eosPromoted),"
+                    + "\"acceptCoverage\":\(guardStats.acceptCoverage),"
+                    + "\"acceptHighWater\":\(guardStats.acceptHighWater),"
+                    + "\"acceptAccepted\":\(guardStats.acceptAccepted),"
                     + "\"globalArgmax\":[\(gaStr)],\"textMass\":[\(tmStr)]}"
                 // Append one JSONL line per generation loop. Chunked generation
                 // calls this once per chunk, so the consumer aggregates across
