@@ -839,10 +839,12 @@ open class TTSKit: @unchecked Sendable {
     ) throws -> any SpeechGenerating {
         switch config.model.family {
             case .qwen3:
+                // `codeDecoder` intentionally stays protocol-typed: everything the
+                // task calls on it is a `CodeDecoding` requirement, so any conforming
+                // implementation (e.g. the MLX talker in Extensions/TTSKitMLX) works.
                 guard let qwen3TextProjector = textProjector as? Qwen3TextProjector,
                     let qwen3CodeEmbedder = codeEmbedder as? Qwen3CodeEmbedder,
                     let qwen3MultiCodeEmbedder = multiCodeEmbedder as? Qwen3MultiCodeEmbedder,
-                    let qwen3CodeDecoder = codeDecoder as? Qwen3CodeDecoder,
                     let qwen3MultiCodeDecoder = multiCodeDecoder as? Qwen3MultiCodeDecoder,
                     let qwen3SpeechDecoder = speechDecoder as? Qwen3SpeechDecoder
                 else {
@@ -852,7 +854,7 @@ open class TTSKit: @unchecked Sendable {
                     textProjector: qwen3TextProjector,
                     codeEmbedder: qwen3CodeEmbedder,
                     multiCodeEmbedder: qwen3MultiCodeEmbedder,
-                    codeDecoder: qwen3CodeDecoder,
+                    codeDecoder: codeDecoder,
                     multiCodeDecoder: qwen3MultiCodeDecoder,
                     speechDecoder: qwen3SpeechDecoder,
                     sampler: sampler,

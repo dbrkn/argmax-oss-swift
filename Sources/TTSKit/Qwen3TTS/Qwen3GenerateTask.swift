@@ -51,10 +51,15 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
     /// Model components - concrete Qwen3 types for correct async method dispatch.
     /// Using `any Protocol` existentials would cause async extension methods to dispatch
     /// to the protocol default (sync path) instead of the Qwen3-specific MLTensor path.
+    ///
+    /// `codeDecoder` is the exception: everything the task calls on it is a
+    /// `CodeDecoding` protocol requirement (no extension methods), so it stays
+    /// protocol-typed — this is the seam that lets `Extensions/TTSKitMLX`
+    /// substitute an MLX-backed talker via `TTSKitConfig.codeDecoder`.
     public let textProjector: Qwen3TextProjector
     public let codeEmbedder: Qwen3CodeEmbedder
     public let multiCodeEmbedder: Qwen3MultiCodeEmbedder
-    public let codeDecoder: Qwen3CodeDecoder
+    public let codeDecoder: any CodeDecoding
     public let multiCodeDecoder: Qwen3MultiCodeDecoder
     public let speechDecoder: Qwen3SpeechDecoder
     public let sampler: any TokenSampling
@@ -75,7 +80,7 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
         textProjector: Qwen3TextProjector,
         codeEmbedder: Qwen3CodeEmbedder,
         multiCodeEmbedder: Qwen3MultiCodeEmbedder,
-        codeDecoder: Qwen3CodeDecoder,
+        codeDecoder: any CodeDecoding,
         multiCodeDecoder: Qwen3MultiCodeDecoder,
         speechDecoder: Qwen3SpeechDecoder,
         sampler: any TokenSampling,
@@ -313,8 +318,15 @@ open class Qwen3GenerateTask: @unchecked Sendable, SpeechGenerating {
 
             // TODO: Remove forking logic with package with min os version upgrade
             if #available(macOS 15.0, iOS 18.0, watchOS 11.0, visionOS 2.0, *), !options.forceLegacyEmbedPath {
-                for embed in combinedEmbeds {
-                    lastCdOutput = try await codeDecoder.decode(inputEmbeds: embed.asMLTensor(), cache: cdCache, state: cdState)
+                if let batchDecoder = codeDecoder as? BatchPrefillCapable {
+                    // Batched prefill: one forward pass over the whole prefix.
+                    // The sequential loop below is dominated by per-call
+                    // dispatch overhead on decoders that support batching.
+                    lastCdOutput = try await batchDecoder.prefill(embeds: combinedEmbeds, cache: cdCache, state: cdState)
+                } else {
+                    for embed in combinedEmbeds {
+                        lastCdOutput = try await codeDecoder.decode(inputEmbeds: embed.asMLTensor(), cache: cdCache, state: cdState)
+                    }
                 }
             } else {
                 for (embedIndex, embed) in combinedEmbeds.enumerated() {
